@@ -29,11 +29,11 @@ Adafruit_SHT31 sht2;
 
 // === SPS30 ===
 SPS30 sps30;
-bool pmValid = false;
 struct sps_values pmData;
 
 bool relayState1 = false;
 bool relayState2 = true;
+bool nosps = 0; // Flag for SPS30 detection
 unsigned long lastRelayCheck = 0;
 unsigned long lastSensorSend = 0;
 unsigned long lastWiFiCheck = 0;
@@ -71,22 +71,34 @@ bool fetchRelayCommand(const char *sensor_id, const char *target, bool currentSt
   return currentState;
 }
 
-bool readSPS30() {
-  uint8_t tries = 0;
-  while (tries++ < 3) {
-    if (sps30.GetValues(&pmData) == SPS30_ERR_OK) {
-      pmValid = true;
+unsigned long lastSPSRead = 0;
+bool readSPS30(struct sps_values &data) {
+  if (millis() - lastSPSRead < 1100) {
+    // Too soon to read again; use previously stored values
+    data = pmData;  // Return last known good value
+    return true;
+  }
+
+  for (uint8_t tries = 0; tries < 3; tries++) {
+    if (sps30.GetValues(&data) == SPS30_ERR_OK) {
+      pmData = data;                // Cache it
+      lastSPSRead = millis();       // Timestamp
       return true;
     }
-    delay(500);
+    Serial.println("❌ SPS30 read failed, retrying...");
+    delay(200);  // Brief wait before retry
   }
-  pmValid = false;
-  return false;
+
+  return false;  // All tries failed
 }
+
 
 void sendSensorData(String id, float t1, float t2, float rh1, float rh2, bool v1, bool v2, bool r1, bool r2) {
   if (WiFi.status() != WL_CONNECTED) return;
-  readSPS30();
+sps_values currentPM;
+bool pmOK =0;
+if(!nosps)
+pmOK= readSPS30(currentPM);
 
   HTTPClient http;
   http.begin(postURL);
@@ -110,7 +122,7 @@ void sendSensorData(String id, float t1, float t2, float rh1, float rh2, bool v1
     payload += "\"rh\":null,";
 
   // SPS30 Mass + Number concentrations
-  if (pmValid) {
+  if (pmOK) {
     payload += "\"pm1\":" + String(pmData.MassPM1, 1) + ",";
     payload += "\"pm25\":" + String(pmData.MassPM2, 1) + ",";
     payload += "\"pm10\":" + String(pmData.MassPM10, 1) + ",";
@@ -130,11 +142,14 @@ void sendSensorData(String id, float t1, float t2, float rh1, float rh2, bool v1
 
   payload += "}";
 
-  Serial.println("📤 POST: " + payload);
-  int code = http.POST(payload);
-  if (code > 0) Serial.println("✅ Supabase: " + http.getString());
-  else Serial.println("❌ POST failed");
 
+  int code = http.POST(payload);
+  Serial.println("📤 POST: " + payload);
+if (code == 200 || code == 201) {
+  Serial.println("✅ Supabase: POST success");
+} else {
+  Serial.printf("❌ Supabase POST failed. Code: %d, Body: %s\n", code, http.getString().c_str());
+}
   http.end();
 }
 
@@ -142,10 +157,11 @@ bool readSensors(float &t1, float &t2, float &rh1, float &rh2, bool &v1, bool &v
   Wire = I2CBus1;
   t1 = sht1.readTemperature();
   rh1 = sht1.readHumidity();
+  Serial.println("SHT1: T=" + String(t1, 2) + "°C, RH=" + String(rh1, 2) + "%");
   Wire = I2CBus2;
   t2 = sht2.readTemperature();
   rh2 = sht2.readHumidity();
-
+  Serial.println("SHT2: T=" + String(t2, 2) + "°C, RH=" + String(rh2, 2) + "%");
   v1 = !isnan(t1) && !isnan(rh1);
   v2 = !isnan(t2) && !isnan(rh2);
   return v1 || v2;
@@ -197,9 +213,12 @@ void setup() {
 
   // === SPS30 Init ===
   if (!sps30.begin(&I2CBus1)) Serial.println("❌ SPS30 I2C init failed");
-  else if (!sps30.probe()) Serial.println("❌ SPS30 not detected");
+  else if (!sps30.probe()) {
+  Serial.println("❌ SPS30 not detected");
+  nosps=1;}
   else {
     Serial.println("✅ SPS30 detected");
+    nosps = 0;
     sps30.reset();
     delay(100);
     if (sps30.start()) Serial.println("✅ SPS30 started");
