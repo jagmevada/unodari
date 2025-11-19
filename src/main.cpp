@@ -13,9 +13,9 @@
 #define EEPROM_RELAY2_ADDR 1
 
 // === Supabase API Info ===
-const char *getURL = "https://akxcjabakrvfaevdfwru.supabase.co/rest/v1/commands";
-const char *postURL = "https://akxcjabakrvfaevdfwru.supabase.co/rest/v1/sensor_data";
-const char *apikey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFreGNqYWJha3J2ZmFldmRmd3J1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDkxMjMwMjUsImV4cCI6MjA2NDY5OTAyNX0.kykki4uVVgkSVU4lH-wcuGRdyu2xJ1CQkYFhQq_u08w";
+const char *getURL = "https://nkkwdcsoijwcbgqrublg.supabase.co/rest/v1/commands";
+const char *postURL = "https://nkkwdcsoijwcbgqrublg.supabase.co/rest/v1/sensor_data";
+const char *apikey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5ra3dkY3NvaWp3Y2JncXJ1YmxnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM0OTg2MDgsImV4cCI6MjA3OTA3NDYwOH0.z3P1a_zOvjm1EGAggj6JS5u0Eo091mUcZ0wXyfEge-w";
 
 // === GPIO Definitions ===
 #define RELAY1_PIN 32 // Air Purifier
@@ -112,14 +112,9 @@ pmOK= readSPS30(currentPM);
   // Temperature & RH
   payload += "\"t1\":" + (v1 ? String(t1, 2) : "null") + ",";
   payload += "\"t2\":" + (v2 ? String(t2, 2) : "null") + ",";
-  if (v1 && v2)
-    payload += "\"rh\":" + String((rh1 + rh2) / 2.0, 2) + ",";
-  else if (v1)
-    payload += "\"rh\":" + String(rh1, 2) + ",";
-  else if (v2)
-    payload += "\"rh\":" + String(rh2, 2) + ",";
-  else
-    payload += "\"rh\":null,";
+  // Send individual relative humidity values for each sensor
+  payload += "\"rh1\":" + (v1 ? String(rh1, 2) : "null") + ",";
+  payload += "\"rh2\":" + (v2 ? String(rh2, 2) : "null") + ",";
 
   // SPS30 Mass + Number concentrations
   if (pmOK) {
@@ -181,7 +176,7 @@ void checkWiFi() {
       Serial.println("\n❌ WiFi reconnect failed. Launching portal...");
       WiFiManager wm;
       wm.setConfigPortalTimeout(120);
-      if (!wm.autoConnect("ECS_R2_SETUP")) {
+      if (!wm.autoConnect("ECS_2_SETUP")) {
         Serial.println("⏳ Portal timeout. Restarting...");
         ESP.restart();
       }
@@ -228,7 +223,7 @@ void setup() {
   WiFiManager wm;
   wm.setConfigPortalTimeout(120);
   wm.setWiFiAutoReconnect(true);
-  if (!wm.autoConnect("ECS_R2_SETUP")) {
+  if (!wm.autoConnect("ECS_2_SETUP")) {
     Serial.println("❌ WiFiManager failed. Restarting...");
     ESP.restart();
   }
@@ -236,8 +231,8 @@ void setup() {
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   delay(1000);
 
-  relayState1 = fetchRelayCommand("ecs_r2", "relay1", relayState1);
-  relayState2 = fetchRelayCommand("ecs_r2", "relay2", relayState2);
+  relayState1 = fetchRelayCommand("ecs_1", "relay1", relayState1);
+  relayState2 = fetchRelayCommand("ecs_1", "relay2", relayState2);
   digitalWrite(RELAY1_PIN, relayState1 ? LOW : HIGH);
   digitalWrite(RELAY2_PIN, relayState2 ? LOW : HIGH);
 
@@ -254,8 +249,8 @@ void loop() {
 
   if (now - lastRelayCheck >= 5000) {
     lastRelayCheck = now;
-    bool newR1 = fetchRelayCommand("ecs_r2", "relay1", relayState1);
-    bool newR2 = fetchRelayCommand("ecs_r2", "relay2", relayState2);
+    bool newR1 = fetchRelayCommand("ecs_1", "relay1", relayState1);
+    bool newR2 = fetchRelayCommand("ecs_1", "relay2", relayState2);
     if (newR1 != relayState1 || newR2 != relayState2) {
       relayState1 = newR1;
       relayState2 = newR2;
@@ -265,9 +260,9 @@ void loop() {
       float t1, t2, rh1, rh2;
       bool v1, v2;
       if (readSensors(t1, t2, rh1, rh2, v1, v2)) {
-        sendSensorData("ecs_r2", t1, t2, rh1, rh2, v1, v2, relayState1, relayState2);
+        sendSensorData("ecs_1", t1, t2, rh1, rh2, v1, v2, relayState1, relayState2);
       } else {
-        sendSensorData("ecs_r2", 0, 0, 0, 0, false, false, relayState1, relayState2);
+        sendSensorData("ecs_1", 0, 0, 0, 0, false, false, relayState1, relayState2);
       }
     }
   }
@@ -277,9 +272,9 @@ void loop() {
     float t1, t2, rh1, rh2;
     bool v1, v2;
     if (readSensors(t1, t2, rh1, rh2, v1, v2)) {
-      sendSensorData("ecs_r2", t1, t2, rh1, rh2, v1, v2, relayState1, relayState2);
+      sendSensorData("ecs_1", t1, t2, rh1, rh2, v1, v2, relayState1, relayState2);
     } else {
-      sendSensorData("ecs_r2", 0, 0, 0, 0, false, false, relayState1, relayState2);
+      sendSensorData("ecs_1", 0, 0, 0, 0, false, false, relayState1, relayState2);
     }
   }
 
