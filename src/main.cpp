@@ -20,7 +20,8 @@ const char *apikey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 // === GPIO Definitions ===
 #define RELAY1_PIN 32 // Air Purifier
 #define RELAY2_PIN 33 // Dehumidifier
-
+//t1, rh1- inside (motor) with sps30 sht1, 
+//t2, rh2- outside (vent) sht2
 // === I2C Buses ===
 TwoWire I2CBus1 = TwoWire(0); // GPIO 21/22
 TwoWire I2CBus2 = TwoWire(1); // GPIO 25/26
@@ -176,7 +177,7 @@ void checkWiFi() {
       Serial.println("\n❌ WiFi reconnect failed. Launching portal...");
       WiFiManager wm;
       wm.setConfigPortalTimeout(120);
-      if (!wm.autoConnect("ECS_2_SETUP")) {
+      if (!wm.autoConnect("ECS_3_SETUP")) {
         Serial.println("⏳ Portal timeout. Restarting...");
         ESP.restart();
       }
@@ -223,7 +224,7 @@ void setup() {
   WiFiManager wm;
   wm.setConfigPortalTimeout(120);
   wm.setWiFiAutoReconnect(true);
-  if (!wm.autoConnect("ECS_2_SETUP")) {
+  if (!wm.autoConnect("ECS_3_SETUP")) {
     Serial.println("❌ WiFiManager failed. Restarting...");
     ESP.restart();
   }
@@ -231,8 +232,8 @@ void setup() {
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   delay(1000);
 
-  relayState1 = fetchRelayCommand("ecs_1", "relay1", relayState1);
-  relayState2 = fetchRelayCommand("ecs_1", "relay2", relayState2);
+  relayState1 = fetchRelayCommand("ecs_3", "relay1", relayState1);
+  relayState2 = fetchRelayCommand("ecs_3", "relay2", relayState2);
   digitalWrite(RELAY1_PIN, relayState1 ? LOW : HIGH);
   digitalWrite(RELAY2_PIN, relayState2 ? LOW : HIGH);
 
@@ -249,8 +250,8 @@ void loop() {
 
   if (now - lastRelayCheck >= 5000) {
     lastRelayCheck = now;
-    bool newR1 = fetchRelayCommand("ecs_1", "relay1", relayState1);
-    bool newR2 = fetchRelayCommand("ecs_1", "relay2", relayState2);
+    bool newR1 = fetchRelayCommand("ecs_3", "relay1", relayState1);
+    bool newR2 = fetchRelayCommand("ecs_3", "relay2", relayState2);
     if (newR1 != relayState1 || newR2 != relayState2) {
       relayState1 = newR1;
       relayState2 = newR2;
@@ -260,9 +261,9 @@ void loop() {
       float t1, t2, rh1, rh2;
       bool v1, v2;
       if (readSensors(t1, t2, rh1, rh2, v1, v2)) {
-        sendSensorData("ecs_1", t1, t2, rh1, rh2, v1, v2, relayState1, relayState2);
+        sendSensorData("ecs_3", t1, t2, rh1, rh2, v1, v2, relayState1, relayState2);
       } else {
-        sendSensorData("ecs_1", 0, 0, 0, 0, false, false, relayState1, relayState2);
+        sendSensorData("ecs_3", 0, 0, 0, 0, false, false, relayState1, relayState2);
       }
     }
   }
@@ -272,9 +273,9 @@ void loop() {
     float t1, t2, rh1, rh2;
     bool v1, v2;
     if (readSensors(t1, t2, rh1, rh2, v1, v2)) {
-      sendSensorData("ecs_1", t1, t2, rh1, rh2, v1, v2, relayState1, relayState2);
+      sendSensorData("ecs_3", t1, t2, rh1, rh2, v1, v2, relayState1, relayState2);
     } else {
-      sendSensorData("ecs_1", 0, 0, 0, 0, false, false, relayState1, relayState2);
+      sendSensorData("ecs_3", 0, 0, 0, 0, false, false, relayState1, relayState2);
     }
   }
 
