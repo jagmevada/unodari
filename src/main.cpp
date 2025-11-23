@@ -14,6 +14,7 @@
 
 // === Supabase API Info ===
 const char *getURL = "https://nkkwdcsoijwcbgqrublg.supabase.co/rest/v1/commands";
+const char *getURLschedule = "https://nkkwdcsoijwcbgqrublg.supabase.co/rest/v1/schedule";
 const char *postURL = "https://nkkwdcsoijwcbgqrublg.supabase.co/rest/v1/sensor_data";
 const char *apikey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5ra3dkY3NvaWp3Y2JncXJ1YmxnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM0OTg2MDgsImV4cCI6MjA3OTA3NDYwOH0.z3P1a_zOvjm1EGAggj6JS5u0Eo091mUcZ0wXyfEge-w";
 
@@ -39,6 +40,9 @@ unsigned long lastRelayCheck = 0;
 unsigned long lastSensorSend = 0;
 unsigned long lastWiFiCheck = 0;
 unsigned long lastEEPROMWrite = 0;
+// === NTP sync tracking ===
+unsigned long lastNTPSync = 0;
+bool ntpSynced = false;
 
 // === WiFi and Supabase ===
 bool fetchRelayCommand(const char *sensor_id, const char *target, bool currentState) {
@@ -232,6 +236,10 @@ void setup() {
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   delay(1000);
 
+  // Assume initial NTP config succeeded; record time
+  lastNTPSync = millis();
+  ntpSynced = true;
+
   relayState1 = fetchRelayCommand("ecs_3", "relay1", relayState1);
   relayState2 = fetchRelayCommand("ecs_3", "relay2", relayState2);
   digitalWrite(RELAY1_PIN, relayState1 ? LOW : HIGH);
@@ -242,6 +250,39 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+
+  // NTP resync logic:
+  // - If synced, attempt resync every 1 hour.
+  // - If not synced, retry every 10 minutes.
+  if (ntpSynced) {
+    if (now - lastNTPSync >= 3600000UL) { // 1 hour
+      configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+      time_t t = time(nullptr);
+      if (t > 1700000000) {
+        ntpSynced = true;
+        lastNTPSync = now;
+        Serial.println("✅ NTP resync success");
+      } else {
+        ntpSynced = false;
+        lastNTPSync = now; // record attempt time so we wait 10 minutes for retry
+        Serial.println("❌ NTP resync failed");
+      }
+    }
+  } else {
+    if (now - lastNTPSync >= 600000UL) { // 10 minutes
+      configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+      time_t t = time(nullptr);
+      if (t > 1700000000) {
+        ntpSynced = true;
+        lastNTPSync = now;
+        Serial.println("✅ NTP sync success");
+      } else {
+        ntpSynced = false;
+        lastNTPSync = now; // record attempt time
+        Serial.println("❌ NTP sync attempt failed");
+      }
+    }
+  }
 
   if (now - lastWiFiCheck > 10000) {
     lastWiFiCheck = now;
