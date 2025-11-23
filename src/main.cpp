@@ -34,7 +34,7 @@
 
 // How often to dump the schedule table to Serial (default 5 minutes)
 #ifndef SCHEDULE_DUMP_INTERVAL_MS
-#define SCHEDULE_DUMP_INTERVAL_MS 10000UL
+#define SCHEDULE_DUMP_INTERVAL_MS 60000UL
 #endif
 
 // Device identifier used to select schedules in Supabase
@@ -43,6 +43,8 @@ const char *deviceId = "ac_1";
 // Maximum schedules to load
 #define MAX_SCHEDULES 8
 
+// India Standard Time offset from UTC in seconds (+5:30)
+static const long IST_OFFSET_SECONDS = 5 * 3600 + 30 * 60;
 // === Supabase API Info ===
 // === Supabase API Info ===
 const char *getURL = "https://nkkwdcsoijwcbgqrublg.supabase.co/rest/v1/commands";
@@ -360,6 +362,249 @@ static unsigned long parseIntervalToSeconds(const String &s) {
   return (unsigned long)h * 3600UL + (unsigned long)m * 60UL + (unsigned long)sec;
 }
 
+// Helpers to compute next ON/OFF epochs (UTC) for schedule rows using local IST
+static time_t nextOnForScheduleRow(const ScheduleRow &r, time_t nowUtc) {
+  time_t nowLocal = nowUtc + IST_OFFSET_SECONDS;
+  struct tm localTm;
+  gmtime_r(&nowLocal, &localTm);
+  int cur_h = localTm.tm_hour;
+  int cur_m = localTm.tm_min;
+  int cur_s = localTm.tm_sec;
+  // local midnight epoch
+  time_t localMidnight = nowLocal - (cur_h * 3600 + cur_m * 60 + cur_s);
+  for (int d = 0; d < 7; ++d) {
+    int dayIndex = (localTm.tm_wday + d) % 7; // weekday index for candidate day
+    if (!r.weekday[dayIndex]) continue;
+    time_t candidateLocal = localMidnight + (time_t)d * 86400 + (time_t)r.on_h * 3600 + (time_t)r.on_m * 60 + (time_t)r.on_s;
+    if (candidateLocal > nowLocal) {
+      // convert local epoch back to UTC
+      return candidateLocal - IST_OFFSET_SECONDS;
+    }
+  }
+  // fallback: return 0 if none
+  return (time_t)0;
+}
+
+static time_t nextOffForScheduleRow(const ScheduleRow &r, time_t nowUtc) {
+  time_t nowLocal = nowUtc + IST_OFFSET_SECONDS;
+  struct tm localTm;
+  gmtime_r(&nowLocal, &localTm);
+  int cur_h = localTm.tm_hour;
+  int cur_m = localTm.tm_min;
+  int cur_s = localTm.tm_sec;
+  time_t localMidnight = nowLocal - (cur_h * 3600 + cur_m * 60 + cur_s);
+  for (int d = 0; d < 7; ++d) {
+    int dayIndex = (localTm.tm_wday + d) % 7;
+    if (!r.weekday[dayIndex]) continue;
+    time_t candidateLocal = localMidnight + (time_t)d * 86400 + (time_t)r.off_h * 3600 + (time_t)r.off_m * 60 + (time_t)r.off_s;
+    if (candidateLocal > nowLocal) {
+      return candidateLocal - IST_OFFSET_SECONDS;
+    }
+  }
+  return (time_t)0;
+}
+
+// For timer rows compute next change epoch (UTC). If timer_state==true, next change is OFF, else next is ON.
+static time_t nextChangeForTimerRow(const ScheduleRow &r, unsigned long nowMs) {
+  if (r.on_duration_s == 0 && r.off_duration_s == 0) return (time_t)0;
+  unsigned long lastToggle = r.last_toggle_ms;
+  if (lastToggle == 0) {
+    // not initialized: assume it will toggle after on_duration from now if initialized as ON
+    if (r.timer_state) {
+      return (time_t)((time(nullptr)) + (time_t)r.on_duration_s);
+    } else {
+      return (time_t)((time(nullptr)) + (time_t)r.off_duration_s);
+    }
+  }
+  unsigned long elapsed = (nowMs - lastToggle) / 1000UL;
+  if (r.timer_state) {
+    if (r.on_duration_s > elapsed) return (time_t)(time(nullptr) + (time_t)(r.on_duration_s - elapsed));
+    else return (time_t)(time(nullptr));
+  } else {
+    if (r.off_duration_s > elapsed) return (time_t)(time(nullptr) + (time_t)(r.off_duration_s - elapsed));
+    else return (time_t)(time(nullptr));
+  }
+}
+
+// Compute and print next ON and OFF times (local IST) across all enabled schedules/timers
+static void printNextOnOffTimes() {
+  if (scheduleCount <= 0) {
+    Serial.println("ℹ️ No schedules loaded");
+    return;
+  }
+  time_t nowUtc = timeManager.now();
+  if (nowUtc <= 0) {
+    Serial.println("⚠️ Time not available — can't compute next events");
+    return;
+  }
+  unsigned long nowMs = millis();
+
+  time_t bestNextOn = (time_t)0;
+  time_t bestNextOff = (time_t)0;
+
+  for (int i = 0; i < scheduleCount; ++i) {
+    ScheduleRow &r = scheduleRows[i];
+    if (!r.enable) continue;
+    if (r.setting.equalsIgnoreCase("schedule")) {
+      time_t candOn = nextOnForScheduleRow(r, nowUtc);
+      time_t candOff = nextOffForScheduleRow(r, nowUtc);
+      if (candOn != 0 && (bestNextOn == 0 || candOn < bestNextOn)) bestNextOn = candOn;
+      if (candOff != 0 && (bestNextOff == 0 || candOff < bestNextOff)) bestNextOff = candOff;
+    } else if (r.setting.equalsIgnoreCase("timer")) {
+      // timer rows: derive next on/off from timer_state and durations
+      if (r.timer_state) {
+        // currently ON; next change is OFF
+        time_t candOff = nextChangeForTimerRow(r, nowMs);
+        if (candOff != 0 && (bestNextOff == 0 || candOff < bestNextOff)) bestNextOff = candOff;
+      } else {
+        // currently OFF; next change is ON
+        time_t candOn = nextChangeForTimerRow(r, nowMs);
+        if (candOn != 0 && (bestNextOn == 0 || candOn < bestNextOn)) bestNextOn = candOn;
+      }
+    }
+  }
+
+  auto printLocal = [&](time_t t, const char *label) {
+    if (t == 0) {
+      Serial.printf("%s: none\n", label);
+      return;
+    }
+    time_t local = t + IST_OFFSET_SECONDS;
+    struct tm lt;
+    gmtime_r(&local, &lt);
+    char buf[64];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S IST", &lt);
+    Serial.printf("%s: %s\n", label, buf);
+  };
+
+  Serial.println("=== Next schedule events (device: " + String(deviceId) + ") ===");
+  printLocal(bestNextOn, "Next ON");
+  printLocal(bestNextOff, "Next OFF");
+  Serial.println("=== end next events ===");
+}
+
+// Print all ON/OFF events in the upcoming 24 hours (IST) across enabled schedules/timers
+static void printNext24hSchedule() {
+  if (scheduleCount <= 0) {
+    Serial.println("ℹ️ No schedules loaded");
+    return;
+  }
+  time_t nowUtc = timeManager.now();
+  if (nowUtc <= 0) {
+    Serial.println("⚠️ Time not available — can't compute next events");
+    return;
+  }
+  unsigned long nowMs = millis();
+  time_t nowLocal = nowUtc + IST_OFFSET_SECONDS;
+  time_t endLocal = nowLocal + 86400; // 24 hours ahead in local time
+
+  const int MAX_EVENTS = 256;
+  time_t evTimes[MAX_EVENTS];
+  int evTypes[MAX_EVENTS]; // 1 = ON, 0 = OFF
+  long evRowId[MAX_EVENTS];
+  int evCount = 0;
+
+  // Collect schedule-based events
+  for (int i = 0; i < scheduleCount; ++i) {
+    ScheduleRow &r = scheduleRows[i];
+    if (!r.enable) continue;
+    if (r.setting.equalsIgnoreCase("schedule")) {
+      // check today and next day in local time
+      for (int d = 0; d < 2; ++d) {
+        // compute local midnight for today + d
+        struct tm lt;
+        gmtime_r(&nowLocal, &lt);
+        int cur_h = lt.tm_hour, cur_m = lt.tm_min, cur_s = lt.tm_sec;
+        time_t localMidnight = nowLocal - (cur_h * 3600 + cur_m * 60 + cur_s) + (time_t)d * 86400;
+        int dayIndex = (lt.tm_wday + d) % 7;
+        if (r.weekday[dayIndex]) {
+          time_t onLocal = localMidnight + (time_t)r.on_h * 3600 + (time_t)r.on_m * 60 + (time_t)r.on_s;
+          time_t offLocal = localMidnight + (time_t)r.off_h * 3600 + (time_t)r.off_m * 60 + (time_t)r.off_s;
+          if (onLocal > nowLocal && onLocal <= endLocal && evCount < MAX_EVENTS) {
+            evTimes[evCount] = onLocal - IST_OFFSET_SECONDS; // store as UTC
+            evTypes[evCount] = 1;
+            evRowId[evCount] = r.row_id;
+            evCount++;
+          }
+          if (offLocal > nowLocal && offLocal <= endLocal && evCount < MAX_EVENTS) {
+            evTimes[evCount] = offLocal - IST_OFFSET_SECONDS;
+            evTypes[evCount] = 0;
+            evRowId[evCount] = r.row_id;
+            evCount++;
+          }
+        }
+      }
+    } else if (r.setting.equalsIgnoreCase("timer")) {
+      // Simulate toggles starting from current state up to 24 hours
+      bool curState = r.timer_state;
+      unsigned long lastToggle = r.last_toggle_ms;
+      unsigned long simNowMs = nowMs;
+      unsigned long simLastToggleMs = lastToggle ? lastToggle : simNowMs;
+      time_t simEventUtc = nowUtc;
+      // limit to avoid runaway
+      int iter = 0;
+      while (evCount < MAX_EVENTS && iter < 64) {
+        iter++;
+        unsigned long elapsed = (simNowMs - simLastToggleMs) / 1000UL;
+        unsigned long remaining = 0;
+        if (curState) remaining = (r.on_duration_s > elapsed) ? (r.on_duration_s - elapsed) : 0;
+        else remaining = (r.off_duration_s > elapsed) ? (r.off_duration_s - elapsed) : 0;
+        time_t nextUtc;
+        if (remaining == 0) {
+          nextUtc = time(nullptr); // immediate toggle
+        } else {
+          nextUtc = nowUtc + (time_t)remaining;
+        }
+        time_t nextLocal = nextUtc + IST_OFFSET_SECONDS;
+        if (nextLocal > nowLocal && nextLocal <= endLocal) {
+          if (evCount < MAX_EVENTS) {
+            evTimes[evCount] = nextUtc;
+            evTypes[evCount] = curState ? 0 : 1; // if currently ON, next is OFF
+            evRowId[evCount] = r.row_id;
+            evCount++;
+          }
+        } else if (nextLocal > endLocal) {
+          break;
+        }
+        // advance simulation
+        simLastToggleMs = simNowMs + remaining * 1000UL;
+        simNowMs = simLastToggleMs;
+        nowUtc = nextUtc;
+        curState = !curState;
+      }
+    }
+  }
+
+  // Simple insertion sort by evTimes
+  for (int i = 1; i < evCount; ++i) {
+    time_t keyT = evTimes[i];
+    int keyType = evTypes[i];
+    long keyId = evRowId[i];
+    int j = i - 1;
+    while (j >= 0 && evTimes[j] > keyT) {
+      evTimes[j + 1] = evTimes[j];
+      evTypes[j + 1] = evTypes[j];
+      evRowId[j + 1] = evRowId[j];
+      j--;
+    }
+    evTimes[j + 1] = keyT;
+    evTypes[j + 1] = keyType;
+    evRowId[j + 1] = keyId;
+  }
+
+  Serial.println("=== Upcoming events (next 24h) ===");
+  for (int i = 0; i < evCount; ++i) {
+    time_t local = evTimes[i] + IST_OFFSET_SECONDS;
+    struct tm lt;
+    gmtime_r(&local, &lt);
+    char buf[64];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S IST", &lt);
+    Serial.printf("%s - %s (row id: %ld)\n", buf, evTypes[i] ? "ON" : "OFF", evRowId[i]);
+  }
+  if (evCount == 0) Serial.println("No events in the next 24 hours.");
+  Serial.println("=== end upcoming events ===");
+}
+
 // Fetch all schedules for this device from Supabase and populate scheduleRows[]
 static void fetchSchedulesFromSupabase() {
   // Preserve previous runtime state to avoid restarting timers on every fetch
@@ -509,8 +754,11 @@ static void checkSchedule() {
 
   time_t epoch = timeManager.now();
   if (epoch <= 0) return;
+  // Use local IST time for schedule comparisons
+  time_t epochUtc = epoch;
+  time_t epochLocal = epochUtc + IST_OFFSET_SECONDS;
   struct tm t;
-  timeManager.getUTCTime(t);
+  gmtime_r(&epochLocal, &t);
   int today = t.tm_wday; // 0=Sun
   int cur_h = t.tm_hour;
   int cur_m = t.tm_min;
@@ -561,6 +809,9 @@ static void checkSchedule() {
     digitalWrite(RELAY1_PIN, relayState1 ? HIGH : LOW);
     Serial.printf("🔁 Schedule engine set relay: %s\n", relayState1 ? "ON" : "OFF");
   }
+  // Print upcoming ON/OFF times after evaluating schedules
+  // printNextOnOffTimes();
+  printNext24hSchedule();
 }
 
 // === Setup ===
