@@ -1,56 +1,61 @@
-#include <WiFiManager.h>
+#include <WiFiManager.h> 
 #include <WiFi.h>
+#include <SPI.h>
 #include <time.h>
 #include <HTTPClient.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 #include <EEPROM.h>
-#include <Wire.h>
-#include <Adafruit_SHT31.h>
-#include <sps30.h>
 
 // === EEPROM Setup ===
-#define EEPROM_SIZE 2
-#define EEPROM_RELAY1_ADDR 0
-#define EEPROM_RELAY2_ADDR 1
+#define EEPROM_SIZE 1
+#define EEPROM_RELAY_ADDR 0
+
+// === Time sync configuration ===
+// Change these macros to adjust sync/retry behavior
+#ifndef TIME_SYNC_INTERVAL_MS
+#define TIME_SYNC_INTERVAL_MS 3600000UL // 1 hour
+#endif
+#ifndef TIME_RETRY_INTERVAL_MS
+#define TIME_RETRY_INTERVAL_MS 600000UL // 10 minutes
+#endif
+#ifndef TIME_INITIAL_TIMEOUT_MS
+#define TIME_INITIAL_TIMEOUT_MS 5000UL // initial NTP wait (ms)
+#endif
+#ifndef TIME_SYNC_ATTEMPT_TIMEOUT_MS
+#define TIME_SYNC_ATTEMPT_TIMEOUT_MS 3000UL // single sync attempt timeout (ms) to avoid long blocking
+#endif
 
 // === Supabase API Info ===
+// === Supabase API Info ===
 const char *getURL = "https://nkkwdcsoijwcbgqrublg.supabase.co/rest/v1/commands";
-const char *getURLschedule = "https://nkkwdcsoijwcbgqrublg.supabase.co/rest/v1/schedule";
 const char *postURL = "https://nkkwdcsoijwcbgqrublg.supabase.co/rest/v1/sensor_data";
 const char *apikey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5ra3dkY3NvaWp3Y2JncXJ1YmxnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM0OTg2MDgsImV4cCI6MjA3OTA3NDYwOH0.z3P1a_zOvjm1EGAggj6JS5u0Eo091mUcZ0wXyfEge-w";
 
 // === GPIO Definitions ===
-#define RELAY1_PIN 32 // Air Purifier
-#define RELAY2_PIN 33 // Dehumidifier
-//t1, rh1- inside (motor) with sps30 sht1, 
-//t2, rh2- outside (vent) sht2
-// === I2C Buses ===
-TwoWire I2CBus1 = TwoWire(0); // GPIO 21/22
-TwoWire I2CBus2 = TwoWire(1); // GPIO 25/26
-Adafruit_SHT31 sht1;
-Adafruit_SHT31 sht2;
+#define ONE_WIRE_BUS_1 23
+#define ONE_WIRE_BUS_2 22
+#define RELAY1_PIN 32
 
-// === SPS30 ===
-SPS30 sps30;
-struct sps_values pmData;
+OneWire oneWire1(ONE_WIRE_BUS_1);
+OneWire oneWire2(ONE_WIRE_BUS_2);
+DallasTemperature sensor1(&oneWire1);
+DallasTemperature sensor2(&oneWire2);
 
 bool relayState1 = false;
-bool relayState2 = true;
-bool nosps = 0; // Flag for SPS30 detection
 unsigned long lastRelayCheck = 0;
 unsigned long lastSensorSend = 0;
 unsigned long lastWiFiCheck = 0;
 unsigned long lastEEPROMWrite = 0;
-// === NTP sync tracking ===
-unsigned long lastNTPSync = 0;
-bool ntpSynced = false;
 
-// === WiFi and Supabase ===
+// === Fetch Relay Command ===
 bool fetchRelayCommand(const char *sensor_id, const char *target, bool currentState) {
   HTTPClient http;
   String url = String(getURL) + "?sensor_id=eq." + sensor_id + "&target=eq." + target + "&order=issued_at.desc&limit=1";
   http.begin(url);
   http.addHeader("apikey", apikey);
   http.addHeader("Authorization", "Bearer " + String(apikey));
+
   int httpCode = http.GET();
   if (httpCode == 200) {
     String response = http.getString();
@@ -76,34 +81,9 @@ bool fetchRelayCommand(const char *sensor_id, const char *target, bool currentSt
   return currentState;
 }
 
-unsigned long lastSPSRead = 0;
-bool readSPS30(struct sps_values &data) {
-  if (millis() - lastSPSRead < 1100) {
-    // Too soon to read again; use previously stored values
-    data = pmData;  // Return last known good value
-    return true;
-  }
-
-  for (uint8_t tries = 0; tries < 3; tries++) {
-    if (sps30.GetValues(&data) == SPS30_ERR_OK) {
-      pmData = data;                // Cache it
-      lastSPSRead = millis();       // Timestamp
-      return true;
-    }
-    Serial.println("❌ SPS30 read failed, retrying...");
-    delay(200);  // Brief wait before retry
-  }
-
-  return false;  // All tries failed
-}
-
-
-void sendSensorData(String id, float t1, float t2, float rh1, float rh2, bool v1, bool v2, bool r1, bool r2) {
+// === Send Sensor Data ===
+void sendSensorData(String id, float t1, float t2, bool valid1, bool valid2, bool relay1) {
   if (WiFi.status() != WL_CONNECTED) return;
-sps_values currentPM;
-bool pmOK =0;
-if(!nosps)
-pmOK= readSPS30(currentPM);
 
   HTTPClient http;
   http.begin(postURL);
@@ -113,227 +93,299 @@ pmOK= readSPS30(currentPM);
 
   String payload = "{";
   payload += "\"sensor_id\":\"" + id + "\",";
-
-  // Temperature & RH
-  payload += "\"t1\":" + (v1 ? String(t1, 2) : "null") + ",";
-  payload += "\"t2\":" + (v2 ? String(t2, 2) : "null") + ",";
-  // Send individual relative humidity values for each sensor
-  payload += "\"rh1\":" + (v1 ? String(rh1, 2) : "null") + ",";
-  payload += "\"rh2\":" + (v2 ? String(rh2, 2) : "null") + ",";
-
-  // SPS30 Mass + Number concentrations
-  if (pmOK) {
-    payload += "\"pm1\":" + String(pmData.MassPM1, 1) + ",";
-    payload += "\"pm25\":" + String(pmData.MassPM2, 1) + ",";
-    payload += "\"pm10\":" + String(pmData.MassPM10, 1) + ",";
-    payload += "\"avg_particle_size\":" + String(pmData.PartSize, 2) + ",";
-    payload += "\"nc0_5\":" + String((int)pmData.NumPM0) + ",";
-    payload += "\"nc1_0\":" + String((int)pmData.NumPM1) + ",";
-    payload += "\"nc2_5\":" + String((int)pmData.NumPM2) + ",";
-    payload += "\"nc10\":" + String((int)pmData.NumPM10) + ",";
-  } else {
-    payload += "\"pm1\":null,\"pm25\":null,\"pm10\":null,\"avg_particle_size\":null,";
-    payload += "\"nc0_5\":null,\"nc1_0\":null,\"nc2_5\":null,\"nc10\":null,";
-  }
-
-  // Relays
-  payload += "\"relay1\":" + String(r1 ? "true" : "false") + ",";
-  payload += "\"relay2\":" + String(r2 ? "true" : "false");
-
+  if (valid1) payload += "\"t1\":" + String(t1, 2) + ",";
+  if (valid2) payload += "\"t2\":" + String(t2, 2) + ",";
+  payload += "\"relay1\":" + String(relay1 ? "true" : "false");
   payload += "}";
 
-
-  int code = http.POST(payload);
   Serial.println("📤 POST: " + payload);
-if (code == 200 || code == 201) {
-  Serial.println("✅ Supabase: POST success");
-} else {
-  Serial.printf("❌ Supabase POST failed. Code: %d, Body: %s\n", code, http.getString().c_str());
-}
+  int code = http.POST(payload);
+  if (code > 0) Serial.println("✅ Supabase: " + http.getString());
+  else Serial.println("❌ POST failed");
+
   http.end();
 }
 
-bool readSensors(float &t1, float &t2, float &rh1, float &rh2, bool &v1, bool &v2) {
-  Wire = I2CBus1;
-  t1 = sht1.readTemperature();
-  rh1 = sht1.readHumidity();
-  Serial.println("SHT1: T=" + String(t1, 2) + "°C, RH=" + String(rh1, 2) + "%");
-  Wire = I2CBus2;
-  t2 = sht2.readTemperature();
-  rh2 = sht2.readHumidity();
-  Serial.println("SHT2: T=" + String(t2, 2) + "°C, RH=" + String(rh2, 2) + "%");
-  v1 = !isnan(t1) && !isnan(rh1);
-  v2 = !isnan(t2) && !isnan(rh2);
-  return v1 || v2;
-}
-
+// === Check WiFi and fallback to WiFiManager if failed ===
 void checkWiFi() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("⚠️ WiFi disconnected! Reconnecting...");
+    Serial.println("⚠️ WiFi disconnected! Attempting reconnect...");
     WiFi.disconnect();
     WiFi.begin();
+
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
       delay(500);
       Serial.print(".");
     }
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("\n❌ WiFi reconnect failed. Launching portal...");
-      WiFiManager wm;
-      wm.setConfigPortalTimeout(120);
-      if (!wm.autoConnect("ECS_3_SETUP")) {
-        Serial.println("⏳ Portal timeout. Restarting...");
-        ESP.restart();
-      }
-    } else {
-      Serial.println("✅ Reconnected to WiFi");
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\n✅ WiFi reconnected!");
+      return;
     }
+
+    Serial.println("\n❌ Reconnect failed. Starting WiFiManager portal...");
+    WiFiManager wm;
+    wm.setConfigPortalTimeout(120);  // 2 minutes
+    if (!wm.autoConnect("AC_2_SETUP")) {
+      Serial.println("⏱ Portal timeout. Restarting...");
+      delay(1000);
+      ESP.restart();
+    }
+
+    Serial.println("✅ Connected via WiFiManager");
   }
 }
 
+// === Read Sensors and return individual validity ===
+void readSensors(float &temp1, float &temp2, bool &valid1, bool &valid2) {
+  sensor1.requestTemperatures();
+  sensor2.requestTemperatures();
+  delay(750);
+  temp1 = sensor1.getTempCByIndex(0);
+  temp2 = sensor2.getTempCByIndex(0);
+  valid1 = (temp1 != 85.0 && temp1 != -127.0);
+  valid2 = (temp2 != 85.0 && temp2 != -127.0);
+}
+// Wait for NTP sync and return epoch time (or 0 if not synced within timeout)
+time_t fetchNetworkTime(unsigned long timeoutMs = 5000) {
+  time_t now = time(nullptr);
+  const time_t validThreshold = 1000000000; // ~2001-09-09, any sane current time will be > this
+  unsigned long start = millis();
+  while (now < validThreshold && (millis() - start) < timeoutMs) {
+    // Use a short sleep to remain responsive; this loop will exit after timeoutMs
+    delay(50);
+    now = time(nullptr);
+  }
+  // If we exited because timeout and no valid time, return -1 to indicate timeout
+  if (now < validThreshold) return (time_t)-1;
+  return now;
+}
+
+// === TimeManager ===
+// Keeps a local epoch running using millis() and periodically attempts to sync
+// with NTP. If offline or NTP fails, local time continues advancing.
+class TimeManager {
+public:
+  TimeManager()
+      : lastSyncedEpoch(0), lastSyncMillis(0), lastAttemptMillis(0),
+        syncIntervalMs(TIME_SYNC_INTERVAL_MS), retryIntervalMs(TIME_RETRY_INTERVAL_MS),
+        lastSyncSuccess(false), lastNoUpdateLogMillis(0) {}
+
+  // Initialize the manager and attempt an immediate sync (timeout ms)
+  void begin(unsigned long intervalMs = TIME_SYNC_INTERVAL_MS, unsigned long initialTimeoutMs = TIME_INITIAL_TIMEOUT_MS) {
+    syncIntervalMs = intervalMs;
+    // Record baseline attempt time so retry/sync intervals are calculated
+    lastAttemptMillis = millis();
+    // Try initial sync; if it fails, seed with current system time (may be 0)
+    if (!trySync(initialTimeoutMs)) {
+      lastSyncedEpoch = time(nullptr);
+      lastSyncSuccess = false;
+      lastAttemptMillis = millis();
+      Serial.println("⚠️ TimeManager: Initial NTP sync failed — continuing with local clock");
+    }
+  }
+
+  // Attempt to sync with network time. Returns true if successful.
+  bool trySync(unsigned long timeoutMs = TIME_SYNC_ATTEMPT_TIMEOUT_MS) {
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("⚠️ TimeManager: NTP sync skipped — WiFi not connected");
+      lastSyncSuccess = false;
+      lastAttemptMillis = millis();
+      return false;
+    }
+    unsigned long attemptStart = millis();
+    time_t epoch = fetchNetworkTime(timeoutMs);
+    unsigned long took = millis() - attemptStart;
+    if (epoch == (time_t)-1) {
+      Serial.printf("⚠️ TimeManager: NTP attempt timed out after %lums\n", took);
+      lastSyncSuccess = false;
+      lastAttemptMillis = millis();
+      return false;
+    }
+    if (epoch >= validThreshold) {
+      // Determine whether this is a fresh sync (i.e. NTP updated the clock)
+      time_t expected = lastSyncedEpoch + (time_t)((attemptStart - lastSyncMillis) / 1000);
+      long diff = (long)epoch - (long)expected;
+      if (lastSyncMillis == 0 || llabs(diff) > 2) {
+        // Fresh sync: update base epoch and millis
+        lastSyncedEpoch = epoch;
+        lastSyncMillis = millis();
+        lastSyncSuccess = true;
+        struct tm tinfo;
+        gmtime_r(&epoch, &tinfo);
+        char buf[32];
+        strftime(buf, sizeof(buf), "%FT%TZ", &tinfo);
+        Serial.printf("⏱ TimeManager: NTP sync succeeded: %s\n", buf);
+        return true;
+      } else {
+        // No observable change — this likely means local clock already had correct time
+        // Update lastSyncMillis so we don't re-check immediately
+        lastSyncSuccess = true; // treat as success for scheduling
+        lastSyncMillis = millis();
+        // Rate-limit informational logs to avoid spam (use retry interval)
+        if ((millis() - lastNoUpdateLogMillis) >= retryIntervalMs) {
+          Serial.println("ℹ️ TimeManager: Time check OK — no new NTP update (using local clock)");
+          lastNoUpdateLogMillis = millis();
+        }
+        return false;
+      }
+    }
+    // Received a time but it's invalid/too small
+    Serial.printf("⚠️ TimeManager: NTP returned invalid epoch: %ld\n", (long)epoch);
+    lastSyncSuccess = false;
+    lastAttemptMillis = millis();
+    return false;
+  }
+
+  // Call from loop() regularly; will trigger a sync when the interval elapsed.
+  void update() {
+    unsigned long nowMs = millis();
+    unsigned long effectiveInterval = lastSyncSuccess ? syncIntervalMs : retryIntervalMs;
+    if (lastSyncSuccess) {
+      if ((nowMs - lastSyncMillis) >= effectiveInterval) {
+        trySync(TIME_SYNC_ATTEMPT_TIMEOUT_MS);
+      }
+    } else {
+      if ((nowMs - lastAttemptMillis) >= effectiveInterval) {
+        trySync(TIME_SYNC_ATTEMPT_TIMEOUT_MS);
+      }
+    }
+  }
+
+  // Returns the current epoch as maintained locally (advances while offline)
+  time_t now() const {
+    unsigned long elapsedMs = millis() - lastSyncMillis;
+    return lastSyncedEpoch + (time_t)(elapsedMs / 1000);
+  }
+
+  // Fill a struct tm with current UTC time
+  void getUTCTime(struct tm &out) const {
+    time_t t = now();
+    gmtime_r(&t, &out);
+  }
+
+  // Adjust sync interval (ms)
+  void setSyncInterval(unsigned long ms) { syncIntervalMs = ms; }
+  // Set a shorter retry interval to use when sync fails (e.g. 10 minutes)
+  void setRetryInterval(unsigned long ms) { retryIntervalMs = ms; }
+
+private:
+  time_t lastSyncedEpoch;
+  unsigned long lastSyncMillis;
+  unsigned long syncIntervalMs;
+  unsigned long retryIntervalMs;
+  bool lastSyncSuccess;
+  unsigned long lastAttemptMillis;
+  unsigned long lastNoUpdateLogMillis;
+  static const time_t validThreshold = 1000000000; // same threshold used above
+};
+
+// Global instance
+TimeManager timeManager;
+
+// === Setup ===
 void setup() {
   EEPROM.begin(EEPROM_SIZE);
   delay(5);
-  Serial.begin(115200);
-
+  pinMode(ONE_WIRE_BUS_1, INPUT_PULLUP);
+  pinMode(ONE_WIRE_BUS_2, INPUT_PULLUP);
   pinMode(RELAY1_PIN, OUTPUT);
-  pinMode(RELAY2_PIN, OUTPUT);
-  relayState1 = EEPROM.read(EEPROM_RELAY1_ADDR) == 1;
-  relayState2 = EEPROM.read(EEPROM_RELAY2_ADDR) == 1;
-  digitalWrite(RELAY1_PIN, relayState1 ? LOW : HIGH);
-  digitalWrite(RELAY2_PIN, relayState2 ? LOW : HIGH);
 
-  I2CBus1.begin(21, 22);
-  I2CBus2.begin(25, 26);
+  relayState1 = EEPROM.read(EEPROM_RELAY_ADDR) == 1;
+  digitalWrite(RELAY1_PIN, relayState1 ? HIGH : LOW);
+  Serial.begin(115200);
+  delay(1000);
+  Serial.printf("🔁 Relay restored from EEPROM: %s\n", relayState1 ? "ON" : "OFF");
 
-  Wire = I2CBus1;
-  sht1.begin(0x44);
-  Wire = I2CBus2;
-  sht2.begin(0x44);
-
-  // === SPS30 Init ===
-  if (!sps30.begin(&I2CBus1)) Serial.println("❌ SPS30 I2C init failed");
-  else if (!sps30.probe()) {
-  Serial.println("❌ SPS30 not detected");
-  nosps=1;}
-  else {
-    Serial.println("✅ SPS30 detected");
-    nosps = 0;
-    sps30.reset();
-    delay(100);
-    if (sps30.start()) Serial.println("✅ SPS30 started");
-    else Serial.println("❌ SPS30 start failed");
-  }
+  sensor1.begin();
+  sensor2.begin();
 
   WiFiManager wm;
   wm.setConfigPortalTimeout(120);
   wm.setWiFiAutoReconnect(true);
-  if (!wm.autoConnect("ECS_3_SETUP")) {
-    Serial.println("❌ WiFiManager failed. Restarting...");
+  if (!wm.autoConnect("AC_2_SETUP")) {
+    Serial.println("⏳ WiFiManager timeout. Restarting...");
+    delay(1000);
     ESP.restart();
   }
 
+  Serial.println("✅ Connected via WiFiManager");
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-  delay(1000);
+  // Initialize TimeManager: it will attempt an immediate sync and then
+  // keep local time running and sync every `TIME_SYNC_INTERVAL_MS`.
+  timeManager.begin(TIME_SYNC_INTERVAL_MS, TIME_INITIAL_TIMEOUT_MS);
+  // Ensure retry interval is set (used when sync fails)
+  timeManager.setRetryInterval(TIME_RETRY_INTERVAL_MS);
+  time_t nowEpoch = timeManager.now();
+  if (nowEpoch >= 1000000000) {
+    struct tm tinfo;
+    timeManager.getUTCTime(tinfo);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%FT%TZ", &tinfo);
+    Serial.printf("⏱ Time initialized: %s\n", buf);
+  } else {
+    Serial.println("⚠️ Time not synchronized yet; using local clock.");
+  }
 
-  // Assume initial NTP config succeeded; record time
-  lastNTPSync = millis();
-  ntpSynced = true;
+  relayState1 = fetchRelayCommand("ac_2", "relay1", relayState1);
+  digitalWrite(RELAY1_PIN, relayState1 ? HIGH : LOW);
+  Serial.printf("🔄 Relay updated from Supabase: %s\n", relayState1 ? "ON" : "OFF");
 
-  relayState1 = fetchRelayCommand("ecs_3", "relay1", relayState1);
-  relayState2 = fetchRelayCommand("ecs_3", "relay2", relayState2);
-  digitalWrite(RELAY1_PIN, relayState1 ? LOW : HIGH);
-  digitalWrite(RELAY2_PIN, relayState2 ? LOW : HIGH);
-
-  lastRelayCheck = lastSensorSend = lastWiFiCheck = lastEEPROMWrite = millis();
+  lastRelayCheck = millis();
+  lastSensorSend = millis();
+  lastWiFiCheck = millis();
+  lastEEPROMWrite = millis();
 }
 
+// === Main Loop ===
 void loop() {
   unsigned long now = millis();
-
-  // NTP resync logic:
-  // - If synced, attempt resync every 1 hour.
-  // - If not synced, retry every 10 minutes.
-  if (ntpSynced) {
-    if (now - lastNTPSync >= 3600000UL) { // 1 hour
-      configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-      time_t t = time(nullptr);
-      if (t > 1700000000) {
-        ntpSynced = true;
-        lastNTPSync = now;
-        Serial.println("✅ NTP resync success");
-      } else {
-        ntpSynced = false;
-        lastNTPSync = now; // record attempt time so we wait 10 minutes for retry
-        Serial.println("❌ NTP resync failed");
-      }
-    }
-  } else {
-    if (now - lastNTPSync >= 600000UL) { // 10 minutes
-      configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-      time_t t = time(nullptr);
-      if (t > 1700000000) {
-        ntpSynced = true;
-        lastNTPSync = now;
-        Serial.println("✅ NTP sync success");
-      } else {
-        ntpSynced = false;
-        lastNTPSync = now; // record attempt time
-        Serial.println("❌ NTP sync attempt failed");
-      }
-    }
-  }
 
   if (now - lastWiFiCheck > 10000) {
     lastWiFiCheck = now;
     checkWiFi();
   }
 
+  // Update TimeManager so it can perform hourly syncs (or keep local time running)
+  timeManager.update();
+
   if (now - lastRelayCheck >= 5000) {
     lastRelayCheck = now;
-    bool newR1 = fetchRelayCommand("ecs_3", "relay1", relayState1);
-    bool newR2 = fetchRelayCommand("ecs_3", "relay2", relayState2);
-    if (newR1 != relayState1 || newR2 != relayState2) {
-      relayState1 = newR1;
-      relayState2 = newR2;
-      digitalWrite(RELAY1_PIN, relayState1 ? LOW : HIGH);
-      digitalWrite(RELAY2_PIN, relayState2 ? LOW : HIGH);
-      Serial.printf("🔄 Relays changed: R1=%s, R2=%s\n", relayState1 ? "ON" : "OFF", relayState2 ? "ON" : "OFF");
-      float t1, t2, rh1, rh2;
-      bool v1, v2;
-      if (readSensors(t1, t2, rh1, rh2, v1, v2)) {
-        sendSensorData("ecs_3", t1, t2, rh1, rh2, v1, v2, relayState1, relayState2);
-      } else {
-        sendSensorData("ecs_3", 0, 0, 0, 0, false, false, relayState1, relayState2);
-      }
+    bool newState = fetchRelayCommand("ac_2", "relay1", relayState1);
+    if (newState != relayState1) {
+      relayState1 = newState;
+      digitalWrite(RELAY1_PIN, relayState1 ? HIGH : LOW);
+      Serial.printf("🔄 Relay changed: %s\n", relayState1 ? "ON" : "OFF");
+
+      float t1, t2;
+      bool valid1, valid2;
+      readSensors(t1, t2, valid1, valid2);
+      sendSensorData("ac_2", t1, t2, valid1, valid2, relayState1);
+      lastSensorSend = now;
     }
   }
 
   if (now - lastSensorSend >= 40000) {
-    lastSensorSend = now;
-    float t1, t2, rh1, rh2;
-    bool v1, v2;
-    if (readSensors(t1, t2, rh1, rh2, v1, v2)) {
-      sendSensorData("ecs_3", t1, t2, rh1, rh2, v1, v2, relayState1, relayState2);
+    float t1, t2;
+    bool valid1, valid2;
+    readSensors(t1, t2, valid1, valid2);
+    if (valid1 || valid2) {
+      Serial.println("📊 Periodic sensor update.");
     } else {
-      sendSensorData("ecs_3", 0, 0, 0, 0, false, false, relayState1, relayState2);
+      Serial.println("⚠️ Both sensors invalid — sending relay only.");
     }
+    sendSensorData("ac_2", t1, t2, valid1, valid2, relayState1);
+    lastSensorSend = now;
   }
 
   if (now - lastEEPROMWrite >= 10000) {
     lastEEPROMWrite = now;
-    bool changed = false;
-    if (EEPROM.read(EEPROM_RELAY1_ADDR) != (relayState1 ? 1 : 0)) {
-      EEPROM.write(EEPROM_RELAY1_ADDR, relayState1 ? 1 : 0);
-      changed = true;
-    }
-    if (EEPROM.read(EEPROM_RELAY2_ADDR) != (relayState2 ? 1 : 0)) {
-      EEPROM.write(EEPROM_RELAY2_ADDR, relayState2 ? 1 : 0);
-      changed = true;
-    }
-    if (changed) {
+    uint8_t stored = EEPROM.read(EEPROM_RELAY_ADDR);
+    if (stored != (relayState1 ? 1 : 0)) {
+      EEPROM.write(EEPROM_RELAY_ADDR, relayState1 ? 1 : 0);
       EEPROM.commit();
-      Serial.println("💾 Relay states saved to EEPROM.");
+      Serial.println("💾 Relay state saved to EEPROM.");
     }
   }
 
