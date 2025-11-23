@@ -1,8 +1,12 @@
+#ifndef ARDUINOJSON_DEPRECATED
+#define ARDUINOJSON_DEPRECATED(msg)
+#endif
 #include <WiFiManager.h> 
 #include <WiFi.h>
 #include <SPI.h>
 #include <time.h>
 #include <HTTPClient.h>
+#include <ArduinoJson.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <EEPROM.h>
@@ -20,15 +24,29 @@
 #define TIME_RETRY_INTERVAL_MS 600000UL // 10 minutes
 #endif
 #ifndef TIME_INITIAL_TIMEOUT_MS
-#define TIME_INITIAL_TIMEOUT_MS 5000UL // initial NTP wait (ms)
+// Give the initial NTP sync a longer window (15s) to accommodate slow networks
+#define TIME_INITIAL_TIMEOUT_MS 15000UL // initial NTP wait (ms)
 #endif
 #ifndef TIME_SYNC_ATTEMPT_TIMEOUT_MS
-#define TIME_SYNC_ATTEMPT_TIMEOUT_MS 3000UL // single sync attempt timeout (ms) to avoid long blocking
+// Per-attempt timeout for subsequent sync tries (10s)
+#define TIME_SYNC_ATTEMPT_TIMEOUT_MS 10000UL // single sync attempt timeout (ms) to avoid long blocking
 #endif
+
+// How often to dump the schedule table to Serial (default 5 minutes)
+#ifndef SCHEDULE_DUMP_INTERVAL_MS
+#define SCHEDULE_DUMP_INTERVAL_MS 10000UL
+#endif
+
+// Device identifier used to select schedules in Supabase
+const char *deviceId = "ac_1";
+
+// Maximum schedules to load
+#define MAX_SCHEDULES 8
 
 // === Supabase API Info ===
 // === Supabase API Info ===
 const char *getURL = "https://nkkwdcsoijwcbgqrublg.supabase.co/rest/v1/commands";
+const char *getURLschedule = "https://nkkwdcsoijwcbgqrublg.supabase.co/rest/v1/schedule";
 const char *postURL = "https://nkkwdcsoijwcbgqrublg.supabase.co/rest/v1/sensor_data";
 const char *apikey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5ra3dkY3NvaWp3Y2JncXJ1YmxnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM0OTg2MDgsImV4cCI6MjA3OTA3NDYwOH0.z3P1a_zOvjm1EGAggj6JS5u0Eo091mUcZ0wXyfEge-w";
 
@@ -47,6 +65,11 @@ unsigned long lastRelayCheck = 0;
 unsigned long lastSensorSend = 0;
 unsigned long lastWiFiCheck = 0;
 unsigned long lastEEPROMWrite = 0;
+// lastScheduleCheck is used to run schedule checks every minute
+unsigned long lastScheduleCheck = 0;
+unsigned long lastScheduleDump = 0;
+// Whether schedule logic is allowed (requires valid NTP time)
+bool scheduleAllowed = false;
 
 // === Fetch Relay Command ===
 bool fetchRelayCommand(const char *sensor_id, const char *target, bool currentState) {
@@ -127,7 +150,7 @@ void checkWiFi() {
     Serial.println("\n❌ Reconnect failed. Starting WiFiManager portal...");
     WiFiManager wm;
     wm.setConfigPortalTimeout(120);  // 2 minutes
-    if (!wm.autoConnect("AC_2_SETUP")) {
+    if (!wm.autoConnect("AC_1_SETUP")) {
       Serial.println("⏱ Portal timeout. Restarting...");
       delay(1000);
       ESP.restart();
@@ -194,15 +217,19 @@ public:
       lastAttemptMillis = millis();
       return false;
     }
+    // Ensure SNTP is (re)configured before waiting for time
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     unsigned long attemptStart = millis();
+    Serial.printf("⏳ TimeManager: attempting NTP sync (timeout %lums)...\n", timeoutMs);
     time_t epoch = fetchNetworkTime(timeoutMs);
     unsigned long took = millis() - attemptStart;
     if (epoch == (time_t)-1) {
-      Serial.printf("⚠️ TimeManager: NTP attempt timed out after %lums\n", took);
+      Serial.printf("⚠️ TimeManager: NTP attempt timed out after %lums (time() still %ld)\n", took, (long)time(nullptr));
       lastSyncSuccess = false;
       lastAttemptMillis = millis();
       return false;
     }
+    Serial.printf("⏱ TimeManager: NTP returned epoch %ld after %lums\n", (long)epoch, took);
     if (epoch >= validThreshold) {
       // Determine whether this is a fresh sync (i.e. NTP updated the clock)
       time_t expected = lastSyncedEpoch + (time_t)((attemptStart - lastSyncMillis) / 1000);
@@ -284,6 +311,258 @@ private:
 // Global instance
 TimeManager timeManager;
 
+// === Schedule engine (placed after TimeManager so it can use its API) ===
+// === Schedule state ===
+struct ScheduleRow {
+  bool enable = false;
+  String setting = ""; // "schedule" or "timer"
+  long row_id = 0; // Added to track Supabase row id
+  // schedule times (time of day)
+  int on_h = 0, on_m = 0, on_s = 0;
+  int off_h = 0, off_m = 0, off_s = 0;
+  // timer durations (seconds)
+  unsigned long on_duration_s = 0;
+  unsigned long off_duration_s = 0;
+  // weekdays: 0=Sun,1=Mon,...6=Sat
+  bool weekday[7] = {false, false, false, false, false, false, false};
+  // timer runtime state
+  bool timer_state = false; // current state during timer mode (true=ON) (unchanged)
+  unsigned long last_toggle_ms = 0; // last change timestamp for timer mode
+  bool initialized = false; // whether we've initialized timer_state
+};
+
+// Array to hold multiple schedules fetched from Supabase
+static ScheduleRow scheduleRows[MAX_SCHEDULES];
+static int scheduleCount = 0;
+
+// Helper: parse interval strings like "08:00:00" into h,m,s
+static void parseIntervalToHMS(const String &s, int &h, int &m, int &sec) {
+  h = m = sec = 0;
+  if (s.length() == 0) return;
+  // Accept formats: HH:MM or HH:MM:SS
+  int first = s.indexOf(':');
+  int second = s.indexOf(':', first + 1);
+  if (first < 0) return;
+  h = s.substring(0, first).toInt();
+  if (second < 0) {
+    m = s.substring(first + 1).toInt();
+    sec = 0;
+  } else {
+    m = s.substring(first + 1, second).toInt();
+    sec = s.substring(second + 1).toInt();
+  }
+}
+
+// Helper: parse interval string to total seconds (for timer durations)
+static unsigned long parseIntervalToSeconds(const String &s) {
+  int h, m, sec;
+  parseIntervalToHMS(s, h, m, sec);
+  return (unsigned long)h * 3600UL + (unsigned long)m * 60UL + (unsigned long)sec;
+}
+
+// Fetch all schedules for this device from Supabase and populate scheduleRows[]
+static void fetchSchedulesFromSupabase() {
+  // Preserve previous runtime state to avoid restarting timers on every fetch
+  ScheduleRow prevRows[MAX_SCHEDULES];
+  int prevCount = scheduleCount;
+  for (int i = 0; i < prevCount && i < MAX_SCHEDULES; ++i) prevRows[i] = scheduleRows[i];
+  scheduleCount = 0;
+  if (WiFi.status() != WL_CONNECTED) return;
+  HTTPClient http;
+  String url = String(getURLschedule) + "?sensor_id=eq." + String(deviceId) + "&target=eq.relay1&order=id.asc";
+  http.begin(url);
+  http.addHeader("apikey", apikey);
+  http.addHeader("Authorization", "Bearer " + String(apikey));
+  int code = http.GET();
+  if (code != 200) {
+    http.end();
+    return;
+  }
+  String resp = http.getString();
+  http.end();
+
+  // Use ArduinoJson to parse the array of schedule rows
+  const size_t capacity = 8192;
+  DynamicJsonDocument doc(capacity);
+  DeserializationError err = deserializeJson(doc, resp);
+  if (err) {
+    Serial.printf("❌ fetchSchedulesFromSupabase: JSON parse failed: %s\n", err.c_str());
+    return;
+  }
+
+  if (!doc.is<JsonArray>()) return;
+  JsonArray arr = doc.as<JsonArray>();
+  for (JsonObject obj : arr) {
+    if (scheduleCount >= MAX_SCHEDULES) break;
+    ScheduleRow &r = scheduleRows[scheduleCount];
+    r.enable = obj["enable"] | false;
+    r.row_id = obj["id"] | 0;
+    const char *s = obj["setting"] | "";
+    r.setting = String(s);
+
+    // parse timer_on_duration / timer_off_duration as strings when present
+    if (!obj["timer_on_duration"].isNull()) {
+      String val = String((const char *)obj["timer_on_duration"]);
+      parseIntervalToHMS(val, r.on_h, r.on_m, r.on_s);
+      r.on_duration_s = parseIntervalToSeconds(val);
+    } else {
+      r.on_h = r.on_m = r.on_s = 0;
+      r.on_duration_s = 0;
+    }
+    if (!obj["timer_off_duration"].isNull()) {
+      String val = String((const char *)obj["timer_off_duration"]);
+      parseIntervalToHMS(val, r.off_h, r.off_m, r.off_s);
+      r.off_duration_s = parseIntervalToSeconds(val);
+    } else {
+      r.off_h = r.off_m = r.off_s = 0;
+      r.off_duration_s = 0;
+    }
+
+    // weekdays
+    r.weekday[1] = obj["mon"] | false;
+    r.weekday[2] = obj["tue"] | false;
+    r.weekday[3] = obj["wed"] | false;
+    r.weekday[4] = obj["thu"] | false;
+    r.weekday[5] = obj["fri"] | false;
+    r.weekday[6] = obj["sat"] | false;
+    r.weekday[0] = obj["sun"] | false;
+
+    // Attempt to restore runtime state from previous fetch (match by row_id)
+    bool restored = false;
+    for (int k = 0; k < prevCount; ++k) {
+      if (prevRows[k].row_id != 0 && prevRows[k].row_id == r.row_id) {
+        r.timer_state = prevRows[k].timer_state;
+        r.last_toggle_ms = prevRows[k].last_toggle_ms;
+        r.initialized = prevRows[k].initialized;
+        restored = true;
+        break;
+      }
+    }
+    if (!restored) {
+      r.timer_state = false;
+      r.last_toggle_ms = 0;
+      r.initialized = false;
+    }
+
+    scheduleCount++;
+  }
+}
+
+// Read the entire schedule table from Supabase and print to Serial
+static void printScheduleTable() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("⚠️ printScheduleTable: WiFi not connected");
+    return;
+  }
+  HTTPClient http;
+  http.begin(getURLschedule);
+  http.addHeader("apikey", apikey);
+  http.addHeader("Authorization", "Bearer " + String(apikey));
+  int code = http.GET();
+  if (code == 200) {
+    String resp = http.getString();
+    // Minor formatting: put each object on its own line for readability
+    resp.replace("},{", "},\n{");
+    Serial.println("=== schedule table ===");
+    Serial.println(resp);
+    Serial.println("=== end schedule table ===");
+  } else {
+    Serial.printf("❌ printScheduleTable: HTTP GET failed, code=%d\n", code);
+    if (code > 0) Serial.println(http.getString());
+  }
+  http.end();
+}
+
+// Fetch and print only enabled schedules for this device (enable = true)
+static void printEnabledSchedules() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("⚠️ printEnabledSchedules: WiFi not connected");
+    return;
+  }
+  HTTPClient http;
+  String url = String(getURLschedule) + "?sensor_id=eq." + String(deviceId) + "&target=eq.relay1&enable=eq.true&order=id.asc";
+  http.begin(url);
+  http.addHeader("apikey", apikey);
+  http.addHeader("Authorization", "Bearer " + String(apikey));
+  int code = http.GET();
+  if (code == 200) {
+    String resp = http.getString();
+    // Minor formatting for readability
+    resp.replace("},{", "},\n{");
+    Serial.println("=== enabled schedules for device: " + String(deviceId) + " ===");
+    Serial.println(resp);
+    Serial.println("=== end enabled schedules ===");
+  } else {
+    Serial.printf("❌ printEnabledSchedules: HTTP GET failed, code=%d\n", code);
+    if (code > 0) Serial.println(http.getString());
+  }
+  http.end();
+}
+
+// Evaluate and apply schedule; call every 1 minute
+static void checkSchedule() {
+  if (!scheduleAllowed) return;
+
+  // Fetch all schedules for this device
+  fetchSchedulesFromSupabase();
+  if (scheduleCount <= 0) return;
+
+  time_t epoch = timeManager.now();
+  if (epoch <= 0) return;
+  struct tm t;
+  timeManager.getUTCTime(t);
+  int today = t.tm_wday; // 0=Sun
+  int cur_h = t.tm_hour;
+  int cur_m = t.tm_min;
+
+  bool anyOnTrigger = false;
+  bool anyOffTrigger = false;
+  int timerOnCount = 0;
+
+  unsigned long nowMs = millis();
+
+  for (int i = 0; i < scheduleCount; ++i) {
+    ScheduleRow &r = scheduleRows[i];
+    if (!r.enable) continue;
+    if (r.setting.equalsIgnoreCase("schedule")) {
+      if (!r.weekday[today]) continue;
+      if (cur_h == r.on_h && cur_m == r.on_m) anyOnTrigger = true;
+      if (cur_h == r.off_h && cur_m == r.off_m) anyOffTrigger = true;
+    } else if (r.setting.equalsIgnoreCase("timer")) {
+      // initialize timer state if needed
+      if (!r.initialized) {
+        r.timer_state = true;
+        r.last_toggle_ms = nowMs;
+        r.initialized = true;
+      }
+      unsigned long elapsed = (nowMs - r.last_toggle_ms) / 1000UL;
+      if (r.timer_state) {
+        if (r.on_duration_s > 0 && elapsed >= r.on_duration_s) {
+          r.timer_state = false;
+          r.last_toggle_ms = nowMs;
+        }
+      } else {
+        if (r.off_duration_s > 0 && elapsed >= r.off_duration_s) {
+          r.timer_state = true;
+          r.last_toggle_ms = nowMs;
+        }
+      }
+      if (r.timer_state) timerOnCount++;
+    }
+  }
+
+  bool desired = relayState1; // default: no change
+  if (anyOffTrigger) desired = false;           // OFF precedence
+  else if (anyOnTrigger) desired = true;
+  else if (timerOnCount > 0) desired = true;
+
+  if (desired != relayState1) {
+    relayState1 = desired;
+    digitalWrite(RELAY1_PIN, relayState1 ? HIGH : LOW);
+    Serial.printf("🔁 Schedule engine set relay: %s\n", relayState1 ? "ON" : "OFF");
+  }
+}
+
 // === Setup ===
 void setup() {
   EEPROM.begin(EEPROM_SIZE);
@@ -304,7 +583,7 @@ void setup() {
   WiFiManager wm;
   wm.setConfigPortalTimeout(120);
   wm.setWiFiAutoReconnect(true);
-  if (!wm.autoConnect("AC_2_SETUP")) {
+  if (!wm.autoConnect("AC_1_SETUP")) {
     Serial.println("⏳ WiFiManager timeout. Restarting...");
     delay(1000);
     ESP.restart();
@@ -324,11 +603,30 @@ void setup() {
     char buf[32];
     strftime(buf, sizeof(buf), "%FT%TZ", &tinfo);
     Serial.printf("⏱ Time initialized: %s\n", buf);
+    scheduleAllowed = true;
   } else {
-    Serial.println("⚠️ Time not synchronized yet; using local clock.");
+    Serial.println("⚠️ Time not synchronized yet; attempting one additional NTP sync at boot...");
+    // Try one more sync attempt at boot to obtain a valid time
+    if (timeManager.trySync(TIME_INITIAL_TIMEOUT_MS)) {
+      time_t newEpoch = timeManager.now();
+      if (newEpoch >= 1000000000) {
+        struct tm tinfo;
+        timeManager.getUTCTime(tinfo);
+        char buf[32];
+        strftime(buf, sizeof(buf), "%FT%TZ", &tinfo);
+        Serial.printf("✅ NTP sync success on second attempt: %s\n", buf);
+        scheduleAllowed = true;
+      } else {
+        Serial.println("❌ NTP sync returned invalid time on second attempt; schedule disabled until NTP available");
+        scheduleAllowed = false;
+      }
+    } else {
+      Serial.println("❌ Additional NTP sync attempt failed; schedule disabled until NTP available");
+      scheduleAllowed = false;
+    }
   }
 
-  relayState1 = fetchRelayCommand("ac_2", "relay1", relayState1);
+  relayState1 = fetchRelayCommand("ac_1", "relay1", relayState1);
   digitalWrite(RELAY1_PIN, relayState1 ? HIGH : LOW);
   Serial.printf("🔄 Relay updated from Supabase: %s\n", relayState1 ? "ON" : "OFF");
 
@@ -350,9 +648,31 @@ void loop() {
   // Update TimeManager so it can perform hourly syncs (or keep local time running)
   timeManager.update();
 
+  // If schedule was disabled at boot, enable it automatically when NTP becomes available later
+  if (!scheduleAllowed) {
+    time_t maybe = timeManager.now();
+    if (maybe >= 1000000000) {
+      scheduleAllowed = true;
+      Serial.println("✅ NTP now available — enabling schedule engine");
+    }
+  }
+
+  // Schedule check: run every 1 minute
+  if (now - lastScheduleCheck >= 60000UL) {
+    lastScheduleCheck = now;
+    checkSchedule();
+  }
+
+  // Periodically dump the schedule table to Serial (non-blocking)
+  if (now - lastScheduleDump >= SCHEDULE_DUMP_INTERVAL_MS) {
+    lastScheduleDump = now;
+    // printScheduleTable();
+    printEnabledSchedules();
+  }
+
   if (now - lastRelayCheck >= 5000) {
     lastRelayCheck = now;
-    bool newState = fetchRelayCommand("ac_2", "relay1", relayState1);
+    bool newState = fetchRelayCommand("ac_1", "relay1", relayState1);
     if (newState != relayState1) {
       relayState1 = newState;
       digitalWrite(RELAY1_PIN, relayState1 ? HIGH : LOW);
@@ -361,7 +681,7 @@ void loop() {
       float t1, t2;
       bool valid1, valid2;
       readSensors(t1, t2, valid1, valid2);
-      sendSensorData("ac_2", t1, t2, valid1, valid2, relayState1);
+      sendSensorData("ac_1", t1, t2, valid1, valid2, relayState1);
       lastSensorSend = now;
     }
   }
@@ -375,7 +695,7 @@ void loop() {
     } else {
       Serial.println("⚠️ Both sensors invalid — sending relay only.");
     }
-    sendSensorData("ac_2", t1, t2, valid1, valid2, relayState1);
+    sendSensorData("ac_1", t1, t2, valid1, valid2, relayState1);
     lastSensorSend = now;
   }
 
