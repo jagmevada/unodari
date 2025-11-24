@@ -773,7 +773,7 @@ static void checkSchedule() {
 
   for (int i = 0; i < scheduleCount; ++i) {
     ScheduleRow &r = scheduleRows[i];
-    if (!r.enable) continue;
+    if (!r.enable) continue;     
     if (r.setting.equalsIgnoreCase("schedule")) {
       if (!r.weekday[today]) continue;
       if (cur_h == r.on_h && cur_m == r.on_m) anyOnTrigger = true;
@@ -803,9 +803,17 @@ static void checkSchedule() {
       }
       if (r.timer_state) timerOnCount++;
     }
+     Serial.printf("[DEBUG] Row %d: setting=%s, timer_state=%d, initialized=%d, last_toggle_ms=%lu, on_duration_s=%lu, off_duration_s=%lu, weekday[today]=%d\n", i, r.setting.c_str(), r.timer_state, r.initialized, r.last_toggle_ms, r.on_duration_s, r.off_duration_s, r.weekday[today]);
   }
 
-  static bool desired = relayState1; // default: no change
+  bool desired = relayState1; // default: no change
+  int timerRowIndex = -1;
+  for (int i = 0; i < scheduleCount; ++i) {
+    if (scheduleRows[i].enable && scheduleRows[i].setting.equalsIgnoreCase("timer")) {
+      timerRowIndex = i;
+      break;
+    }
+  }
   // Event-driven behavior:
   // - If any OFF trigger occurred now, latch timers disabled and force OFF
   // - If any ON trigger occurred now, clear the latch and force ON
@@ -819,8 +827,9 @@ static void checkSchedule() {
     Serial.println("⏱ Schedule ON event: relay1 forced ON and timers enabled");
   } else {
     // No schedule event this minute: timers only affect relay when not disabled
-    if (!timersDisabledBySchedule) {
-      if (timerOnCount > 0) desired = true;
+    if (!timersDisabledBySchedule && timerRowIndex != -1) {
+      desired = scheduleRows[timerRowIndex].timer_state;
+      Serial.printf("⏱ Timer evaluation: timer_state=%d, relay1 desired state: %s\n", scheduleRows[timerRowIndex].timer_state, desired ? "ON" : "OFF");
     }
     // if timersDisabledBySchedule is true, timers have no effect until cleared by schedule ON or manual ON
   }
