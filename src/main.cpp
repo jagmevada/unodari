@@ -38,7 +38,7 @@
 #endif
 
 // Device identifier used to select schedules in Supabase
-const char *deviceId = "ac_1";
+const char *deviceId = "ac_3";
 
 // Maximum schedules to load
 #define MAX_SCHEDULES 8
@@ -72,6 +72,8 @@ unsigned long lastScheduleCheck = 0;
 unsigned long lastScheduleDump = 0;
 // Whether schedule logic is allowed (requires valid NTP time)
 bool scheduleAllowed = false;
+// When a schedule OFF event occurs we latch timers disabled until schedule ON or manual ON
+bool timersDisabledBySchedule = false;
 
 // === Fetch Relay Command ===
 bool fetchRelayCommand(const char *sensor_id, const char *target, bool currentState) {
@@ -152,7 +154,7 @@ void checkWiFi() {
     Serial.println("\n❌ Reconnect failed. Starting WiFiManager portal...");
     WiFiManager wm;
     wm.setConfigPortalTimeout(120);  // 2 minutes
-    if (!wm.autoConnect("AC_1_SETUP")) {
+    if (!wm.autoConnect("AC_3_SETUP")) {
       Serial.println("⏱ Portal timeout. Restarting...");
       delay(1000);
       ESP.restart();
@@ -777,6 +779,8 @@ static void checkSchedule() {
       if (cur_h == r.on_h && cur_m == r.on_m) anyOnTrigger = true;
       if (cur_h == r.off_h && cur_m == r.off_m) anyOffTrigger = true;
     } else if (r.setting.equalsIgnoreCase("timer")) {
+      // If timers are disabled by a previous schedule OFF event, skip timer toggles
+      if (timersDisabledBySchedule) continue;
       // initialize timer state if needed
       if (!r.initialized) {
         r.timer_state = true;
@@ -788,30 +792,47 @@ static void checkSchedule() {
         if (r.on_duration_s > 0 && elapsed >= r.on_duration_s) {
           r.timer_state = false;
           r.last_toggle_ms = nowMs;
+          Serial.printf("⏱ Timer row %ld: relay1 OFF at %lu ms\n", r.row_id, nowMs);
         }
       } else {
         if (r.off_duration_s > 0 && elapsed >= r.off_duration_s) {
           r.timer_state = true;
           r.last_toggle_ms = nowMs;
+          Serial.printf("⏱ Timer row %ld: relay1 ON at %lu ms\n", r.row_id, nowMs);
         }
       }
       if (r.timer_state) timerOnCount++;
     }
   }
 
-  bool desired = relayState1; // default: no change
-  if (anyOffTrigger) desired = false;           // OFF precedence
-  else if (anyOnTrigger) desired = true;
-  else if (timerOnCount > 0) desired = true;
+  static bool desired = relayState1; // default: no change
+  // Event-driven behavior:
+  // - If any OFF trigger occurred now, latch timers disabled and force OFF
+  // - If any ON trigger occurred now, clear the latch and force ON
+  if (anyOffTrigger) {
+    timersDisabledBySchedule = true;
+    desired = false; // OFF takes precedence and latches timers disabled
+    Serial.println("⏱ Schedule OFF event: relay1 forced OFF and timers disabled");
+  } else if (anyOnTrigger) {
+    timersDisabledBySchedule = false;
+    desired = true;
+    Serial.println("⏱ Schedule ON event: relay1 forced ON and timers enabled");
+  } else {
+    // No schedule event this minute: timers only affect relay when not disabled
+    if (!timersDisabledBySchedule) {
+      if (timerOnCount > 0) desired = true;
+    }
+    // if timersDisabledBySchedule is true, timers have no effect until cleared by schedule ON or manual ON
+  }
 
   if (desired != relayState1) {
     relayState1 = desired;
     digitalWrite(RELAY1_PIN, relayState1 ? HIGH : LOW);
-    Serial.printf("🔁 Schedule engine set relay: %s\n", relayState1 ? "ON" : "OFF");
+    Serial.printf("🔁 Schedule engine set relay: %s\n", relayState1 ? "ON" : "OFF");    
   }
   // Print upcoming ON/OFF times after evaluating schedules
   // printNextOnOffTimes();
-  printNext24hSchedule();
+  // printNext24hSchedule();
 }
 
 // === Setup ===
@@ -834,7 +855,7 @@ void setup() {
   WiFiManager wm;
   wm.setConfigPortalTimeout(120);
   wm.setWiFiAutoReconnect(true);
-  if (!wm.autoConnect("AC_1_SETUP")) {
+  if (!wm.autoConnect("AC_3_SETUP")) {
     Serial.println("⏳ WiFiManager timeout. Restarting...");
     delay(1000);
     ESP.restart();
@@ -877,7 +898,7 @@ void setup() {
     }
   }
 
-  relayState1 = fetchRelayCommand("ac_1", "relay1", relayState1);
+  relayState1 = fetchRelayCommand("ac_3", "relay1", relayState1);
   digitalWrite(RELAY1_PIN, relayState1 ? HIGH : LOW);
   Serial.printf("🔄 Relay updated from Supabase: %s\n", relayState1 ? "ON" : "OFF");
 
@@ -918,21 +939,47 @@ void loop() {
   if (now - lastScheduleDump >= SCHEDULE_DUMP_INTERVAL_MS) {
     lastScheduleDump = now;
     // printScheduleTable();
-    printEnabledSchedules();
+    // printEnabledSchedules();
   }
 
   if (now - lastRelayCheck >= 5000) {
     lastRelayCheck = now;
-    bool newState = fetchRelayCommand("ac_1", "relay1", relayState1);
+    bool newState = fetchRelayCommand("ac_3", "relay1", relayState1);
     if (newState != relayState1) {
+      // Manual command detected. Apply manual reset rules for timers.
+      if (newState) {
+        // Manual ON: clear schedule-driven timer disable latch and reset timers to ON from now
+        timersDisabledBySchedule = false;
+        for (int i = 0; i < scheduleCount; ++i) {
+          ScheduleRow &r = scheduleRows[i];
+          if (!r.enable) continue;
+          if (r.setting.equalsIgnoreCase("timer")) {
+            r.timer_state = true;
+            r.last_toggle_ms = millis();
+            r.initialized = true;
+          }
+        }
+      } else {
+        // Manual OFF: reset timers to OFF from now (but do NOT clear timersDisabledBySchedule)
+        for (int i = 0; i < scheduleCount; ++i) {
+          ScheduleRow &r = scheduleRows[i];
+          if (!r.enable) continue;
+          if (r.setting.equalsIgnoreCase("timer")) {
+            r.timer_state = false;
+            r.last_toggle_ms = millis();
+            r.initialized = true;
+          }
+        }
+      }
+
       relayState1 = newState;
       digitalWrite(RELAY1_PIN, relayState1 ? HIGH : LOW);
-      Serial.printf("🔄 Relay changed: %s\n", relayState1 ? "ON" : "OFF");
+      Serial.printf("🔄 Relay changed (manual): %s\n", relayState1 ? "ON" : "OFF");
 
       float t1, t2;
       bool valid1, valid2;
       readSensors(t1, t2, valid1, valid2);
-      sendSensorData("ac_1", t1, t2, valid1, valid2, relayState1);
+      sendSensorData("ac_3", t1, t2, valid1, valid2, relayState1);
       lastSensorSend = now;
     }
   }
@@ -946,7 +993,7 @@ void loop() {
     } else {
       Serial.println("⚠️ Both sensors invalid — sending relay only.");
     }
-    sendSensorData("ac_1", t1, t2, valid1, valid2, relayState1);
+    sendSensorData("ac_3", t1, t2, valid1, valid2, relayState1);
     lastSensorSend = now;
   }
 
