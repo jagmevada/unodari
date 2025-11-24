@@ -38,7 +38,7 @@
 #endif
 
 // Device identifier used to select schedules in Supabase
-const char *deviceId = "ac_3";
+const char *deviceId = "ac_1";
 
 // Maximum schedules to load
 #define MAX_SCHEDULES 8
@@ -154,7 +154,8 @@ void checkWiFi() {
     Serial.println("\n❌ Reconnect failed. Starting WiFiManager portal...");
     WiFiManager wm;
     wm.setConfigPortalTimeout(120);  // 2 minutes
-    if (!wm.autoConnect("AC_3_SETUP")) {
+    String setupName = String(deviceId) + "_SETUP";
+    if (!wm.autoConnect(setupName.c_str())) {
       Serial.println("⏱ Portal timeout. Restarting...");
       delay(1000);
       ESP.restart();
@@ -864,7 +865,8 @@ void setup() {
   WiFiManager wm;
   wm.setConfigPortalTimeout(120);
   wm.setWiFiAutoReconnect(true);
-  if (!wm.autoConnect("AC_3_SETUP")) {
+  String setupName = String(deviceId) + "_SETUP";
+  if (!wm.autoConnect(setupName.c_str())) {
     Serial.println("⏳ WiFiManager timeout. Restarting...");
     delay(1000);
     ESP.restart();
@@ -907,7 +909,7 @@ void setup() {
     }
   }
 
-  relayState1 = fetchRelayCommand("ac_3", "relay1", relayState1);
+  relayState1 = fetchRelayCommand(deviceId, "relay1", relayState1);
   digitalWrite(RELAY1_PIN, relayState1 ? HIGH : LOW);
   Serial.printf("🔄 Relay updated from Supabase: %s\n", relayState1 ? "ON" : "OFF");
 
@@ -953,7 +955,7 @@ void loop() {
 
   if (now - lastRelayCheck >= 5000) {
     lastRelayCheck = now;
-    bool newState = fetchRelayCommand("ac_3", "relay1", relayState1);
+    bool newState = fetchRelayCommand(deviceId, "relay1", relayState1);
     if (newState != relayState1) {
       // Manual command detected. Apply manual reset rules for timers.
       if (newState) {
@@ -988,7 +990,7 @@ void loop() {
       float t1, t2;
       bool valid1, valid2;
       readSensors(t1, t2, valid1, valid2);
-      sendSensorData("ac_3", t1, t2, valid1, valid2, relayState1);
+      sendSensorData(deviceId, t1, t2, valid1, valid2, relayState1);
       lastSensorSend = now;
     }
   }
@@ -1002,7 +1004,7 @@ void loop() {
     } else {
       Serial.println("⚠️ Both sensors invalid — sending relay only.");
     }
-    sendSensorData("ac_3", t1, t2, valid1, valid2, relayState1);
+    sendSensorData(deviceId, t1, t2, valid1, valid2, relayState1);
     lastSensorSend = now;
   }
 
