@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Device Meal Dashboard</title>
     <link rel="stylesheet" href="style.css">
 
@@ -10,46 +11,50 @@
 </head>
 <body>
 
-<h1>Device Meal Dashboard</h1>
+<h1>ઉનોદરી કૂપન કાઉન્ટર</h1>
 
 <div id="container" class="grid">
-    <div class="card">
-        <h3>UNO_1</h3>
-        <div class="row"><span>Breakfast:</span> <b class="breakfast" data-device="uno_1">0</b></div>
-        <div class="row"><span>Lunch:</span> <b class="lunch" data-device="uno_1">0</b></div>
-        <div class="row"><span>Dinner:</span> <b class="dinner" data-device="uno_1">0</b></div>
+    <!-- Breakfast Card -->
+    <div class="card" data-meal="breakfast" id="breakfast-card">
+        <h3>સવાર</h3>
+        <div class="row"><span>દર્શનાર્થી:</span> <b class="device-count" data-device="uno_1" data-meal="breakfast">0</b></div>
+        <div class="row"><span>ટિફિન:</span> <b class="device-count" data-device="uno_2" data-meal="breakfast">0</b></div>
+        <div class="row"><span>મહાત્મા:</span> <b class="device-count" data-device="uno_3" data-meal="breakfast">0</b></div>
         <hr>
-        <div class="row"><span>Total:</span> <b class="total" data-device="uno_1">0</b></div>
-        <p class="timestamp" data-device="uno_1">Last Updated: -</p>
+        <div class="row"><span>કુલ:</span> <b class="meal-total" data-meal="breakfast">0</b></div>
+        <p class="timestamp" data-meal="breakfast">Last Updated: -</p>
     </div>
 
-    <div class="card">
-        <h3>UNO_2</h3>
-        <div class="row"><span>Breakfast:</span> <b class="breakfast" data-device="uno_2">0</b></div>
-        <div class="row"><span>Lunch:</span> <b class="lunch" data-device="uno_2">0</b></div>
-        <div class="row"><span>Dinner:</span> <b class="dinner" data-device="uno_2">0</b></div>
+    <!-- Lunch Card -->
+    <div class="card" data-meal="lunch" id="lunch-card">
+        <h3>બપોર</h3>
+        <div class="row"><span>દર્શનાર્થી:</span> <b class="device-count" data-device="uno_1" data-meal="lunch">0</b></div>
+        <div class="row"><span>ટિફિન:</span> <b class="device-count" data-device="uno_2" data-meal="lunch">0</b></div>
+        <div class="row"><span>મહાત્મા:</span> <b class="device-count" data-device="uno_3" data-meal="lunch">0</b></div>
         <hr>
-        <div class="row"><span>Total:</span> <b class="total" data-device="uno_2">0</b></div>
-        <p class="timestamp" data-device="uno_2">Last Updated: -</p>
+        <div class="row"><span>કુલ:</span> <b class="meal-total" data-meal="lunch">0</b></div>
+        <p class="timestamp" data-meal="lunch">Last Updated: -</p>
     </div>
 
-    <div class="card">
-        <h3>UNO_3</h3>
-        <div class="row"><span>Breakfast:</span> <b class="breakfast" data-device="uno_3">0</b></div>
-        <div class="row"><span>Lunch:</span> <b class="lunch" data-device="uno_3">0</b></div>
-        <div class="row"><span>Dinner:</span> <b class="dinner" data-device="uno_3">0</b></div>
+    <!-- Dinner Card -->
+    <div class="card" data-meal="dinner" id="dinner-card">
+        <h3>સાંજ</h3>
+        <div class="row"><span>દર્શનાર્થી:</span> <b class="device-count" data-device="uno_1" data-meal="dinner">0</b></div>
+        <div class="row"><span>ટિફિન:</span> <b class="device-count" data-device="uno_2" data-meal="dinner">0</b></div>
+        <div class="row"><span>મહાત્મા:</span> <b class="device-count" data-device="uno_3" data-meal="dinner">0</b></div>
         <hr>
-        <div class="row"><span>Total:</span> <b class="total" data-device="uno_3">0</b></div>
-        <p class="timestamp" data-device="uno_3">Last Updated: -</p>
+        <div class="row"><span>કુલ:</span> <b class="meal-total" data-meal="dinner">0</b></div>
+        <p class="timestamp" data-meal="dinner">Last Updated: -</p>
     </div>
 </div>
 
-<h2>Total Summary</h2>
+<h2>કુલ સારાંશ</h2>
 <div id="totals" class="totals-box">
-    <p>Total Breakfast: <span id="total-breakfast">0</span></p>
-    <p>Total Lunch: <span id="total-lunch">0</span></p>
-    <p>Total Dinner: <span id="total-dinner">0</span></p>
-    <p><b>Grand Total: <span id="grand-total">0</span></b></p>
+    <p>સવાર: <span id="total-breakfast">0</span></p>
+    <p>બપોર: <span id="total-lunch">0</span></p>
+    <p>સાંજ: <span id="total-dinner">0</span></p>
+    <hr>
+    <p><b>કુલ: <span id="grand-total">0</span></b></p>
 </div>
 
 <script src="script.js"></script>

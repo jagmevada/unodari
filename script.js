@@ -45,17 +45,18 @@ function highlightActiveMeal() {
 
 // Main function to load all data
 async function loadData() {
-    let totalBreakfast = 0;
-    let totalLunch = 0;
-    let totalDinner = 0;
+    const mealData = {
+        breakfast: { devices: {}, total: 0, timestamp: '' },
+        lunch: { devices: {}, total: 0, timestamp: '' },
+        dinner: { devices: {}, total: 0, timestamp: '' }
+    };
+    reorderMealCards();
     let grandTotal = 0;
 
+    // Fetch data for each device
     for (let sensor of devices) {
-
-        // Get today's date in YYYY-MM-DD format
         const today = new Date().toISOString().split('T')[0];
 
-        // Fetch each device data
         const { data, error } = await supabase
             .from("unodari_token")
             .select("*")
@@ -67,28 +68,73 @@ async function loadData() {
 
         const { breakfast, lunch, dinner, total, timestamp } = data;
 
-        // accumulate totals
-        totalBreakfast += breakfast;
-        totalLunch += lunch;
-        totalDinner += dinner;
-        grandTotal += total;
+        // Organize by meal type
+        mealData.breakfast.devices[sensor] = breakfast;
+        mealData.breakfast.total += breakfast;
+        mealData.breakfast.timestamp = timestamp;
 
-        // Update only the values in the static cards
-        document.querySelector(`b.breakfast[data-device="${sensor}"]`).innerText = breakfast;
-        document.querySelector(`b.lunch[data-device="${sensor}"]`).innerText = lunch;
-        document.querySelector(`b.dinner[data-device="${sensor}"]`).innerText = dinner;
-        document.querySelector(`b.total[data-device="${sensor}"]`).innerText = total;
-        document.querySelector(`p.timestamp[data-device="${sensor}"]`).innerText = `Last Updated: ${formatTimestamp(timestamp)}`;
+        mealData.lunch.devices[sensor] = lunch;
+        mealData.lunch.total += lunch;
+        mealData.lunch.timestamp = timestamp;
+
+        mealData.dinner.devices[sensor] = dinner;
+        mealData.dinner.total += dinner;
+        mealData.dinner.timestamp = timestamp;
+
+        grandTotal += total;
+    }
+
+    // Update meal cards with device counts
+    for (const meal of ['breakfast', 'lunch', 'dinner']) {
+        const mealInfo = mealData[meal];
+        
+        // Update individual device counts
+        for (const device of devices) {
+            const count = mealInfo.devices[device] || 0;
+            const element = document.querySelector(`b.device-count[data-device="${device}"][data-meal="${meal}"]`);
+            if (element) element.innerText = count;
+        }
+
+        // Update meal total
+        const totalElement = document.querySelector(`b.meal-total[data-meal="${meal}"]`);
+        if (totalElement) totalElement.innerText = mealInfo.total;
+
+        // Update timestamp
+        const timestampElement = document.querySelector(`p.timestamp[data-meal="${meal}"]`);
+        if (timestampElement) {
+            timestampElement.innerText = `Last Updated: ${mealInfo.timestamp ? formatTimestamp(mealInfo.timestamp) : '-'}`;
+        }
     }
 
     // Update totals section
-    document.getElementById("total-breakfast").innerText = totalBreakfast;
-    document.getElementById("total-lunch").innerText = totalLunch;
-    document.getElementById("total-dinner").innerText = totalDinner;
+    document.getElementById("total-breakfast").innerText = mealData.breakfast.total;
+    document.getElementById("total-lunch").innerText = mealData.lunch.total;
+    document.getElementById("total-dinner").innerText = mealData.dinner.total;
     document.getElementById("grand-total").innerText = grandTotal;
+    
+    // Reorder cards with active meal on top
+    reorderMealCards();
     
     // Highlight active meal period
     highlightActiveMeal();
+}
+
+// Function to reorder meal cards with active meal on top
+function reorderMealCards() {
+    const container = document.getElementById('container');
+    const activeMeal = getCurrentMealPeriod();
+    
+    if (!activeMeal) return;
+
+    const meals = ['breakfast', 'lunch', 'dinner'];
+    const mealOrder = [activeMeal, ...meals.filter(m => m !== activeMeal)];
+
+    mealOrder.forEach(meal => {
+        const card = document.querySelector(`[data-meal="${meal}"]`);
+        if (card) {
+            container.appendChild(card); // Move to end (which reorders them)
+        }
+    });
 }
 
 // Format timestamp nicely
