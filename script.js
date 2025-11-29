@@ -53,9 +53,16 @@ async function loadData() {
     reorderMealCards();
     let grandTotal = 0;
 
+    // Get today's date with timezone consideration
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const today = `${year}-${month}-${day}`;
+
     // Fetch data for each device
     for (let sensor of devices) {
-        const today = new Date().toISOString().split('T')[0];
+        
 
         const { data, error } = await supabase
             .from("unodari_token")
@@ -112,7 +119,7 @@ async function loadData() {
     document.getElementById("total-dinner").innerText = mealData.dinner.total;
     document.getElementById("grand-total").innerText = grandTotal;
     
-    // Reorder cards with active meal on top
+    // Reorder cards with active meal on top (after data is loaded)
     reorderMealCards();
     
     // Highlight active meal period
@@ -124,9 +131,22 @@ function reorderMealCards() {
     const container = document.getElementById('container');
     const activeMeal = getCurrentMealPeriod();
     
+    const meals = ['breakfast', 'lunch', 'dinner'];
+    
+    // Mark inactive cards with inactive class
+    meals.forEach(meal => {
+        const card = document.querySelector(`[data-meal="${meal}"]`);
+        if (card) {
+            if (activeMeal && meal !== activeMeal) {
+                card.classList.add('inactive');
+            } else {
+                card.classList.remove('inactive');
+            }
+        }
+    });
+    
     if (!activeMeal) return;
 
-    const meals = ['breakfast', 'lunch', 'dinner'];
     const mealOrder = [activeMeal, ...meals.filter(m => m !== activeMeal)];
 
     mealOrder.forEach(meal => {
