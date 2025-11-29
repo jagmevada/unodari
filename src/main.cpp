@@ -10,10 +10,16 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <EEPROM.h>
-
+#define BFL 7
+#define BFH 9
+#define LFL 11
+#define LFH 14
+#define DFL 18  
+#define DFH 21
+#define DUMMYHREFORTESTING 19  // Adjust this value to test different meal times
 // === EEPROM Setup ===
-#define EEPROM_SIZE 1
-#define EEPROM_RELAY_ADDR 0
+#define EEPROM_SIZE sizeof(TokenData)
+#define EEPROM_TOKEN_ADDR 0
 
 // === Time sync configuration ===
 // Change these macros to adjust sync/retry behavior
@@ -25,7 +31,7 @@
 #endif
 #ifndef TIME_INITIAL_TIMEOUT_MS
 // Give the initial NTP sync a longer window (15s) to accommodate slow networks
-#define TIME_INITIAL_TIMEOUT_MS 15000UL // initial NTP wait (ms)
+#define TIME_INITIAL_TIMEOUT_MS 5000UL // initial NTP wait (ms)
 #endif
 #ifndef TIME_SYNC_ATTEMPT_TIMEOUT_MS
 // Per-attempt timeout for subsequent sync tries (10s)
@@ -39,8 +45,24 @@
 
 // Device identifier used to select schedules in Supabase
 const char *deviceId = "uno_1";
-const char *deviceId2 = "uno_2";
-const char *deviceId3 = "uno_3";
+enum mealType {
+  NONE,
+  BREAKFAST,
+  LUNCH,
+  DINNER,
+  MEAL_COUNT
+};
+String  meal[MEAL_COUNT] = {"none", "breakfast", "lunch", "dinner"};
+mealType currentMeal = NONE;
+
+struct TokenData {
+  int token_count;
+  mealType meal;
+  char date[11];    // Will hold "yyyy-mm-dd"
+  bool update;
+};
+
+TokenData token_data = {0, NONE, "1970-01-01", false};
 
 // Maximum schedules to load
 #define MAX_SCHEDULES 8
@@ -219,65 +241,18 @@ private:
 // Global instance
 TimeManager timeManager;
 
-
-// === Send Sensor Data ===
-void sendSensorData(String id, int t1, int t2, bool valid1, bool valid2) {
-  if (WiFi.status() != WL_CONNECTED) return;
-
-  HTTPClient http;
-  http.begin(postURL);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("apikey", apikey);
-  http.addHeader("Authorization", "Bearer " + String(apikey));
-
-  String payload = "{";
-  payload += "\"sensor_id\":\"" + id + "\",";
-  if (valid1) payload += "\"t1\":" + String(t1, 2) + ",";
-  // payload += "\"relay1\":" + String(relay1 ? "true" : "false");
-  payload += "}";
-
-  Serial.println("📤 POST: " + payload);
-  int code = http.POST(payload);
-  if (code > 0) Serial.println("✅ Supabase: " + http.getString());
-  else Serial.println("❌ POST failed");
-
-  http.end();
-}
-
-
-void sendTokenData(String id, int tokenCount) {
+void sendTokenData(String id, TokenData * token_data) {
   Serial.println("the function is called");
   if (WiFi.status() != WL_CONNECTED) return;
-
-  // Get IST time
-  time_t epoch = timeManager.now();
-  time_t epochLocal = epoch + IST_OFFSET_SECONDS;
-  struct tm t;
-  gmtime_r(&epochLocal, &t);
-  char dateStr[11];
-  strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &t);
-  int hour = t.tm_hour;
-
-  String meal;
-  if (hour >= 7 && hour < 9) meal = "breakfast";
-  else if (hour >= 11 && hour < 14) meal = "lunch";
-  else if (hour >= 18 && hour < 21) meal = "dinner";
-  else meal = "none";
-
-  if (meal == "none") {
-    Serial.println("⏸ Not a meal time, skipping token send.");
-    return;
-  }
-
    HTTPClient http;
-    String url = String(postURL) + "?sensor_id=eq." + id + "&date=eq." + dateStr;
+    String url = String(postURL) + "?sensor_id=eq." + id + "&date=eq." + token_data->date;
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("apikey", apikey);
     http.addHeader("Authorization", "Bearer " + String(apikey));
     http.addHeader("Prefer", "return=representation");
     StaticJsonDocument<256> doc;
-    doc[meal] = tokenCount;
+    doc[meal[token_data->meal]] = token_data->token_count;
     String payload;
     serializeJson(doc, payload);
 
@@ -345,16 +320,23 @@ void setup() {
   delay(5);
   pinMode(ONE_WIRE_BUS_1, INPUT_PULLUP);
   pinMode(ONE_WIRE_BUS_2, INPUT_PULLUP);
-  pinMode(RELAY1_PIN, OUTPUT);
-
-  relayState1 = EEPROM.read(EEPROM_RELAY_ADDR) == 1;
-  digitalWrite(RELAY1_PIN, relayState1 ? HIGH : LOW);
   Serial.begin(115200);
   delay(1000);
-  Serial.printf("🔁 Relay restored from EEPROM: %s\n", relayState1 ? "ON" : "OFF");
-
-  sensor1.begin();
-  sensor2.begin();
+  EEPROM.get(EEPROM_TOKEN_ADDR, token_data);
+  // Safety check: validate struct fields
+  bool valid = true;
+  if (token_data.meal < NONE || token_data.meal >= MEAL_COUNT) valid = false;
+  if (strlen(token_data.date) != 10) valid = false;
+  if (!valid) {
+    Serial.println("⚠️ EEPROM data invalid, reinitializing token_data");
+    token_data.token_count = 0;
+    token_data.meal = NONE;
+    strcpy(token_data.date, "1970-01-01");
+    token_data.update = false;
+    EEPROM.put(EEPROM_TOKEN_ADDR, token_data);
+    EEPROM.commit();
+  }
+  Serial.printf("🔁 TokenData restored from EEPROM: count=%d, meal=%s, date=%s\n", token_data.token_count, meal[token_data.meal].c_str(), token_data.date);
 
   WiFiManager wm;
   wm.setConfigPortalTimeout(120);
@@ -368,44 +350,50 @@ void setup() {
 
   Serial.println("✅ Connected via WiFiManager");
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-  // Initialize TimeManager: it will attempt an immediate sync and then
-  // keep local time running and sync every `TIME_SYNC_INTERVAL_MS`.
-  timeManager.begin(TIME_SYNC_INTERVAL_MS, TIME_INITIAL_TIMEOUT_MS);
-  // Ensure retry interval is set (used when sync fails)
-  timeManager.setRetryInterval(TIME_RETRY_INTERVAL_MS);
-  time_t nowEpoch = timeManager.now();
-  if (nowEpoch >= 1000000000) {
-    struct tm tinfo;
-    timeManager.getUTCTime(tinfo);
-    char buf[32];
-    strftime(buf, sizeof(buf), "%FT%TZ", &tinfo);
-    Serial.printf("⏱ Time initialized: %s\n", buf);
-    // scheduleAllowed = true;
-  } else {
-    Serial.println("⚠️ Time not synchronized yet; attempting one additional NTP sync at boot...");
-    // Try one more sync attempt at boot to obtain a valid time
-    if (timeManager.trySync(TIME_INITIAL_TIMEOUT_MS)) {
-      time_t newEpoch = timeManager.now();
-      if (newEpoch >= 1000000000) {
-        struct tm tinfo;
-        timeManager.getUTCTime(tinfo);
-        char buf[32];
-        strftime(buf, sizeof(buf), "%FT%TZ", &tinfo);
-        Serial.printf("✅ NTP sync success on second attempt: %s\n", buf);
-        // scheduleAllowed = true;
+  // Keep retrying until a valid server clock is received
+  Serial.println("⏳ Waiting for valid server clock...");
+  unsigned long startWait = millis();
+  while (true) {
+    timeManager.begin(TIME_SYNC_INTERVAL_MS, TIME_INITIAL_TIMEOUT_MS);
+    time_t nowEpoch = timeManager.now();
+    if (nowEpoch >= 1000000000) {
+      struct tm tinfo;
+      timeManager.getUTCTime(tinfo);
+      char buf[32];
+      strftime(buf, sizeof(buf), "%FT%TZ", &tinfo);
+      Serial.printf("⏱ Time initialized: %s\n", buf);
+      // After clock is initialized, compare EEPROM date and mealtype
+      // Convert NTP to IST date string
+      time_t epochLocal = nowEpoch + IST_OFFSET_SECONDS;
+      struct tm tIST;
+      gmtime_r(&epochLocal, &tIST);
+      char todayIST[11];
+      strftime(todayIST, sizeof(todayIST), "%Y-%m-%d", &tIST);
+      // Determine current meal type
+      int hour = tIST.tm_hour+DUMMYHREFORTESTING;
+      mealType currentMealType = NONE;
+      if (hour >= BFL && hour < BFH) currentMealType = BREAKFAST;
+      else if (hour >= LFL && hour < LFH) currentMealType = LUNCH;
+      else if (hour >= DFL && hour < DFH) currentMealType = DINNER;
+      // Compare EEPROM date and mealtype
+      if (strcmp(token_data.date, todayIST) == 0 && token_data.meal == currentMealType) {
+        Serial.printf("✅ EEPROM date and meal match: %s, %s. Keeping token_count=%d\n", todayIST, meal[currentMealType].c_str(), token_data.token_count);
       } else {
-        Serial.println("❌ NTP sync returned invalid time on second attempt; schedule disabled until NTP available");
-        // scheduleAllowed = false;
+        Serial.printf("ℹ️ EEPROM date/meal mismatch or new meal/day. Initializing token_count=0\n");
+        token_data.token_count = 0;
+        strncpy(token_data.date, todayIST, sizeof(token_data.date));
+        token_data.date[10] = '\0';
+        token_data.meal = currentMealType;
+        token_data.update = true;
+        EEPROM.put(EEPROM_TOKEN_ADDR, token_data);
+        EEPROM.commit();
       }
+      break;
     } else {
-      Serial.println("❌ Additional NTP sync attempt failed; schedule disabled until NTP available");
-      // scheduleAllowed = false;
+      Serial.println("⚠️ Time not synchronized yet; retrying in 2s...");
+      delay(2000);
     }
   }
-
-  // relayState1 = fetchRelayCommand(deviceId, "relay1", relayState1);
-  // digitalWrite(RELAY1_PIN, relayState1 ? HIGH : LOW);
-  // Serial.printf("🔄 Relay updated from Supabase: %s\n", relayState1 ? "ON" : "OFF");
 
   // lastRelayCheck = millis();
   lastSensorSend = millis();
@@ -426,32 +414,44 @@ void loop() {
   timeManager.update();
 
   if (now - lastSensorSend >= 10000) {
-    static int t1=0, t2=10, t3=20;  
-    bool valid1, valid2;
-    valid1= true;
-    valid2= true;
 
-    // readSensors(t1, t2, valid1, valid2);
-    if (valid1 || valid2) {
-      Serial.println("📊 Periodic sensor update.");
-    } else {
-      Serial.println("⚠️ Both sensors invalid — sending relay only.");
+  // Get IST time
+  time_t epoch = timeManager.now();
+  time_t epochLocal = epoch + IST_OFFSET_SECONDS;
+  struct tm t;
+  gmtime_r(&epochLocal, &t);
+  char dateStr[11];
+  strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &t);
+  int hour = t.tm_hour+DUMMYHREFORTESTING;
+  strncpy(token_data.date, dateStr, sizeof(token_data.date));
+  token_data.date[10] = '\0';   // ensure null-terminated
+
+
+  if (hour >= BFL && hour < BFH) token_data.meal  = BREAKFAST;
+  else if (hour >= LFL && hour < LFH) token_data.meal = LUNCH;
+  else if (hour >= DFL && hour < DFH) token_data.meal = DINNER;
+  else token_data.meal = NONE;
+
+ if (token_data.meal == NONE) {
+    Serial.printf("⏸ Not a meal time, skipping token send. hour=%d, token_count=%d, date=%s, meal=%s\n",
+                  hour, token_data.token_count, token_data.date, meal[token_data.meal].c_str());
+}
+  else{
+      token_data.token_count += 1;
+      token_data.update = true;
+      sendTokenData(deviceId, &token_data);
+     
     }
-    t1++;
-    t2++;
-    t3++;
-    sendTokenData(deviceId, t1);
-
-    lastSensorSend = now;
+     lastSensorSend = now;
   }
-  if (now - lastEEPROMWrite >= 10000) {
+
+  if ((now - lastEEPROMWrite >= 20000) || token_data.update == true ) {
     lastEEPROMWrite = now;
-    uint8_t stored = EEPROM.read(EEPROM_RELAY_ADDR);
-    if (stored != (relayState1 ? 1 : 0)) {
-      EEPROM.write(EEPROM_RELAY_ADDR, relayState1 ? 1 : 0);
-      EEPROM.commit();
-      Serial.println("💾 Relay state saved to EEPROM.");
-    }
+    token_data.update = false;
+    EEPROM.put(EEPROM_TOKEN_ADDR, token_data);
+    EEPROM.commit();
+    Serial.println("💾 TokenData saved to EEPROM.");
   }
  delay(10);
+
 }
