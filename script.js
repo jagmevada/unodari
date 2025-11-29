@@ -16,7 +16,7 @@ const mealTimes = {
 
 // Function to determine current meal time
 function getCurrentMealPeriod() {
-    const hour = new Date().getHours();
+    const hour = new Date().getHours()+12;
     
     if (hour >= mealTimes.breakfast.start && hour < mealTimes.breakfast.end) {
         return 'breakfast';

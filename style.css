@@ -18,6 +18,7 @@ h1 {
     margin-bottom: 10px;
     font-weight: 700;
     text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.2);
+    letter-spacing: 0.05em;
 }
 
 h2 {
