@@ -16,7 +16,7 @@ const mealTimes = {
 
 // Function to determine current meal time
 function getCurrentMealPeriod() {
-    const hour = new Date().getHours()+12;
+    const hour = new Date().getHours(); // Add +<>
     
     if (hour >= mealTimes.breakfast.start && hour < mealTimes.breakfast.end) {
         return 'breakfast';
@@ -167,7 +167,7 @@ function formatTimestamp(ts) {
 loadData();
 
 // Auto-refresh every 10 seconds
-setInterval(loadData, 10000);
+// setInterval(loadData, 10000);
 
 // Update highlight every minute to catch time changes
 setInterval(highlightActiveMeal, 60000);

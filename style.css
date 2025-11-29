@@ -79,13 +79,14 @@ h2 {
     border-bottom: 3px solid #667eea;
     text-transform: uppercase;
     letter-spacing: 2px;
+    text-align: center;
 }
 
 .row {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin: 8px 0;
+    margin: 8px 14px;
     border-radius: 8px;
     transition: all 0.3s ease;
 }
