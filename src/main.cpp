@@ -53,15 +53,12 @@
           * Clears the U8g2 buffer, calls drawScreen(), then sends the buffer.
 
   - drawScreen():
-      - Uses a big font (u8g2_font_10x20_tf) for the title "TCRT + Keypad".
-      - Uses a smaller bold font (u8g2_font_8x13B_tf) for data.
-      - Displays:
+      - Uses a big font (u8g2_font_10x20_tf) for the title "Counter".
+      - Shows a 5-segment battery icon in the top-right corner (0–4 bars).
+      - Uses a smaller bold font (u8g2_font_8x13B_tf) for data:
           * S1 A:<analog> D:<H/L>
           * S2 A:<analog> D:<H/L>
           * Last key: <string>
-      - Coordinates chosen to fit cleanly on a 128x64 display with SH1106 driver
-        (we previously fixed left-shift / garbage-column issues by using the
-        correct U8g2 constructor for SH1106).
 
   Design notes:
   - Interrupts are IRAM_ATTR and kept minimal (only set flags).
@@ -69,11 +66,14 @@
   - Serial output is structured for an Arduino-like / VS Code serial plotter.
   - The display code is separated into updateDisplay() + drawScreen() for clarity.
 
-  Next steps (for Copilot to help with later):
-  - Add additional UI screens (e.g., raw ADC values, threshold settings, live graph bars).
-  - Implement calibration / threshold adjustment for TCRT5000 using keypad.
-  - Possibly add a menu system driven by the four keys.
-  - Keep the existing interrupt + debounce pattern and U8g2 drawing style.
+  Battery UI:
+  - g_batteryLevelIndex is a 0..4 value corresponding to:
+      0 -> 0%
+      1 -> 25%
+      2 -> 50%
+      3 -> 75%
+      4 -> 100%
+  - drawBattery() draws a 5-bar icon at the top-right of the SH1106 screen.
 */
 
 #include <Arduino.h>
@@ -132,11 +132,14 @@ uint32_t g_key2LastPressMs = 0;
 uint32_t g_key3LastPressMs = 0;
 uint32_t g_key4LastPressMs = 0;
 
+// Battery level: 0..4 => 0,25,50,75,100%
+uint8_t g_batteryLevelIndex = 4;  // start showing 100%
+
 // =============================
 // OLED Display (U8g2)
 // =============================
 
-// Full-frame buffer, SSD1306 128x64, hardware I2C, no reset pin
+// Full-frame buffer, SH1106 128x64, hardware I2C, no reset pin
 // Uses default SDA=21, SCL=22 on ESP32
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
@@ -159,6 +162,7 @@ void onKey3Pressed();
 void onKey4Pressed();
 
 void drawScreen();
+void drawBattery(uint8_t levelIndex);
 
 // ISRs
 void IRAM_ATTR isrKey1();
@@ -194,6 +198,9 @@ void loop() {
   handleKeypad();
   updateDisplay();
 
+  // TODO: later you can update g_batteryLevelIndex based on ADC/battery
+  // For now it's fixed.
+
   delay(LOOP_DELAY_MS);
 }
 
@@ -211,18 +218,9 @@ void setupSerial() {
 void setupDisplay() {
   // Initialize I2C and display
   u8g2.begin();
-// Small, very readable (good for data)
-// u8g2.setFont(u8g2_font_6x10_tf);
 
-// // Slightly bigger
-u8g2.setFont(u8g2_font_7x13_tf);
-
-// // Bold-ish, good for headings
-// u8g2.setFont(u8g2_font_8x13B_tf);
-
-// // Nice medium size
-// u8g2.setFont(u8g2_font_10x20_tf);
-
+  // Default font (we switch fonts inside drawScreen())
+  u8g2.setFont(u8g2_font_7x13_tf);
 }
 
 void setupSensors() {
@@ -256,7 +254,7 @@ void readSensors() {
   g_sensor1Digital = digitalRead(S1_D0_PIN);
   g_sensor2Digital = digitalRead(S2_D0_PIN);
 
-  // Debug print  //using serial plotter vscode plugin by Mario Zechner
+  // Debug print  // using serial plotter vscode plugin by Mario Zechner
   Serial.print(">");
 
   Serial.print("S1: ");
@@ -264,15 +262,15 @@ void readSensors() {
   Serial.print(",");
 
   Serial.print("D1: ");
-  Serial.print(g_sensor1Digital );
-  Serial.print("," );
+  Serial.print(g_sensor1Digital);
+  Serial.print(",");
 
   Serial.print("S2: ");
   Serial.print(g_sensor2Analog);
   Serial.print(",");
 
   Serial.print("D2: ");
-  Serial.println(g_sensor2Digital );
+  Serial.println(g_sensor2Digital);
 }
 
 // =============================
@@ -316,21 +314,25 @@ void handleKeypad() {
 
 void onKey1Pressed() {
   g_lastKeyPressed = "Key 1";
+  g_batteryLevelIndex = 0;
   Serial.println("Key 1 pressed");
 }
 
 void onKey2Pressed() {
   g_lastKeyPressed = "Key 2";
+  g_batteryLevelIndex = 1;
   Serial.println("Key 2 pressed");
 }
 
 void onKey3Pressed() {
   g_lastKeyPressed = "Key 3";
+  g_batteryLevelIndex = 2;
   Serial.println("Key 3 pressed");
 }
 
 void onKey4Pressed() {
   g_lastKeyPressed = "Key 4";
+  g_batteryLevelIndex = 3;
   Serial.println("Key 4 pressed");
 }
 
@@ -344,55 +346,56 @@ void updateDisplay() {
   u8g2.sendBuffer();
 }
 
-// void drawScreen() {
-//   const int16_t x0    = 0;   // start from column 1 to compensate left shift
-//   const int16_t lineH = 10;
-//   int16_t y = 10;
+// Draw 5-segment battery at top-right
+// levelIndex: 0..4 → 0%,25%,50%,75%,100%
+void drawBattery(uint8_t levelIndex) {
+  if (levelIndex > 4) levelIndex = 4;   // clamp
 
-//   // Shorter title to fit in 128 px
-//   u8g2.setCursor(x0, y);
-//   u8g2.print("TCRT + Keypad");
-//   y += lineH;
+  // Battery position & size (top-right)
+  const uint8_t battW = 18;    // main body width
+  const uint8_t battH = 8;     // main body height
+  const uint8_t tipW  = 2;     // small terminal width
 
-//   // Sensor 1
-//   u8g2.setCursor(x0, y);
-//   u8g2.print("S1 A:");
-//   u8g2.print(g_sensor1Analog);
-//   u8g2.print(" D:");
-//   u8g2.print(g_sensor1Digital ? "H" : "L");
-//   y += lineH;
+  const uint8_t battX = 128 - battW - tipW - 1; // leave 1px margin from right
+  const uint8_t battY = 2;                       // a bit below top border
 
-//   // Sensor 2
-//   u8g2.setCursor(x0, y);
-//   u8g2.print("S2 A:");
-//   u8g2.print(g_sensor2Analog);
-//   u8g2.print(" D:");
-//   u8g2.print(g_sensor2Digital ? "H" : "L");
-//   y += lineH;
+  // Outline of battery body
+  u8g2.drawFrame(battX, battY, battW, battH);
 
-//   // Last key
-//   u8g2.setCursor(x0, y);
-//   u8g2.print("Last key: ");
-//   u8g2.print(g_lastKeyPressed);
-//   y += lineH;
+  // Battery terminal ("+" side)
+  u8g2.drawBox(battX + battW, battY + 2, tipW, battH - 4);
 
-//   u8g2.setCursor(x0, y);
-//   u8g2.print("Press keys to test");
-// }
+  // Inner filling (5 bars, we’ll light 0..levelIndex)
+  const uint8_t innerX = battX + 2;
+  const uint8_t innerY = battY + 2;
+  const uint8_t innerH = battH - 4;
+  const uint8_t barW   = 2;
+  const uint8_t gap    = 1;
 
+  // Max 5 bars fit in this width
+  for (uint8_t i = 0; i <= levelIndex; i++) {
+    uint8_t bx = innerX + i * (barW + gap);
+    u8g2.drawBox(bx, innerY, barW, innerH);
+  }
+}
 
 void drawScreen() {
   const int16_t x0 = 0;
   int16_t y = 14;
 
-  // Title big
-u8g2.setFont(u8g2_font_10x20_tf);
+  // Header: big font
+  u8g2.setFont(u8g2_font_10x20_tf);
   u8g2.setCursor(x0, y);
-  u8g2.print("TCRT + Keypad");
+  u8g2.print("Counter");
+
+  // Battery icon on top-right
+  drawBattery(g_batteryLevelIndex);
+
+  // Move down for data lines
   y += 16;
 
-  // Data small
- u8g2.setFont(u8g2_font_8x13B_tf);
+  // Data: smaller bold font
+  u8g2.setFont(u8g2_font_8x13B_tf);
 
   u8g2.setCursor(x0, y);
   u8g2.print("S1 A:");
