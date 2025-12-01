@@ -33,7 +33,7 @@
 // =============================
 
 #define BUTTON_DEBOUNCE_MS  50UL   // debounce time for keypad (in ms)
-#define LOOP_DELAY_MS       50UL   // main loop delay
+#define LOOP_DELAY_MS       10UL   // main loop delay
 
 // =============================
 // Global State
@@ -130,7 +130,7 @@ void loop() {
 // =============================
 
 void setupSerial() {
-  Serial.begin(115200);
+  Serial.begin(460800);
   delay(200);
   Serial.println();
   Serial.println("=== ESP32 Keypad + TCRT5000 + OLED (U8g2) ===");
@@ -139,7 +139,18 @@ void setupSerial() {
 void setupDisplay() {
   // Initialize I2C and display
   u8g2.begin();
-  u8g2.setFont(u8g2_font_6x10_tf);  // similar to u8g_font_6x10
+// Small, very readable (good for data)
+// u8g2.setFont(u8g2_font_6x10_tf);
+
+// // Slightly bigger
+u8g2.setFont(u8g2_font_7x13_tf);
+
+// // Bold-ish, good for headings
+// u8g2.setFont(u8g2_font_8x13B_tf);
+
+// // Nice medium size
+// u8g2.setFont(u8g2_font_10x20_tf);
+
 }
 
 void setupSensors() {
@@ -173,16 +184,23 @@ void readSensors() {
   g_sensor1Digital = digitalRead(S1_D0_PIN);
   g_sensor2Digital = digitalRead(S2_D0_PIN);
 
-  // Debug print
-  Serial.print("S1 A0: ");
-  Serial.print(g_sensor1Analog);
-  Serial.print("  D0: ");
-  Serial.print(g_sensor1Digital ? "HIGH" : "LOW");
+  // Debug print  //using serial plotter vscode plugin by Mario Zechner
+  Serial.print(">");
 
-  Serial.print("  |  S2 A0: ");
+  Serial.print("S1: ");
+  Serial.print(g_sensor1Analog);
+  Serial.print(",");
+
+  Serial.print("D1: ");
+  Serial.print(g_sensor1Digital );
+  Serial.print("," );
+
+  Serial.print("S2: ");
   Serial.print(g_sensor2Analog);
-  Serial.print("  D0: ");
-  Serial.println(g_sensor2Digital ? "HIGH" : "LOW");
+  Serial.print(",");
+
+  Serial.print("D2: ");
+  Serial.println(g_sensor2Digital );
 }
 
 // =============================
@@ -254,40 +272,73 @@ void updateDisplay() {
   u8g2.sendBuffer();
 }
 
-void drawScreen() {
-  const int16_t x0    = 0;   // start from column 1 to compensate left shift
-  const int16_t lineH = 10;
-  int16_t y = 10;
+// void drawScreen() {
+//   const int16_t x0    = 0;   // start from column 1 to compensate left shift
+//   const int16_t lineH = 10;
+//   int16_t y = 10;
 
-  // Shorter title to fit in 128 px
+//   // Shorter title to fit in 128 px
+//   u8g2.setCursor(x0, y);
+//   u8g2.print("TCRT + Keypad");
+//   y += lineH;
+
+//   // Sensor 1
+//   u8g2.setCursor(x0, y);
+//   u8g2.print("S1 A:");
+//   u8g2.print(g_sensor1Analog);
+//   u8g2.print(" D:");
+//   u8g2.print(g_sensor1Digital ? "H" : "L");
+//   y += lineH;
+
+//   // Sensor 2
+//   u8g2.setCursor(x0, y);
+//   u8g2.print("S2 A:");
+//   u8g2.print(g_sensor2Analog);
+//   u8g2.print(" D:");
+//   u8g2.print(g_sensor2Digital ? "H" : "L");
+//   y += lineH;
+
+//   // Last key
+//   u8g2.setCursor(x0, y);
+//   u8g2.print("Last key: ");
+//   u8g2.print(g_lastKeyPressed);
+//   y += lineH;
+
+//   u8g2.setCursor(x0, y);
+//   u8g2.print("Press keys to test");
+// }
+
+
+void drawScreen() {
+  const int16_t x0 = 0;
+  int16_t y = 14;
+
+  // Title big
+u8g2.setFont(u8g2_font_10x20_tf);
   u8g2.setCursor(x0, y);
   u8g2.print("TCRT + Keypad");
-  y += lineH;
+  y += 16;
 
-  // Sensor 1
+  // Data small
+ u8g2.setFont(u8g2_font_8x13B_tf);
+
   u8g2.setCursor(x0, y);
   u8g2.print("S1 A:");
   u8g2.print(g_sensor1Analog);
   u8g2.print(" D:");
   u8g2.print(g_sensor1Digital ? "H" : "L");
-  y += lineH;
+  y += 13;
 
-  // Sensor 2
   u8g2.setCursor(x0, y);
   u8g2.print("S2 A:");
   u8g2.print(g_sensor2Analog);
   u8g2.print(" D:");
   u8g2.print(g_sensor2Digital ? "H" : "L");
-  y += lineH;
+  y += 13;
 
-  // Last key
   u8g2.setCursor(x0, y);
   u8g2.print("Last key: ");
   u8g2.print(g_lastKeyPressed);
-  y += lineH;
-
-  u8g2.setCursor(x0, y);
-  u8g2.print("Press keys to test");
 }
 
 // =============================
