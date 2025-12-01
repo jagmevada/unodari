@@ -66,10 +66,7 @@ uint32_t g_key4LastPressMs = 0;
 
 // Full-frame buffer, SSD1306 128x64, hardware I2C, no reset pin
 // Uses default SDA=21, SCL=22 on ESP32
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(
-  U8G2_R0,          // rotation
-  U8X8_PIN_NONE     // reset pin
-);
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
 // =============================
 // Forward Declarations
@@ -258,15 +255,17 @@ void updateDisplay() {
 }
 
 void drawScreen() {
-  int16_t y = 10;
+  const int16_t x0    = 0;   // start from column 1 to compensate left shift
   const int16_t lineH = 10;
+  int16_t y = 10;
 
-  u8g2.setCursor(0, y);
-  u8g2.print("TCRT5000 + Keypad Debug");
+  // Shorter title to fit in 128 px
+  u8g2.setCursor(x0, y);
+  u8g2.print("TCRT + Keypad");
   y += lineH;
 
   // Sensor 1
-  u8g2.setCursor(0, y);
+  u8g2.setCursor(x0, y);
   u8g2.print("S1 A:");
   u8g2.print(g_sensor1Analog);
   u8g2.print(" D:");
@@ -274,7 +273,7 @@ void drawScreen() {
   y += lineH;
 
   // Sensor 2
-  u8g2.setCursor(0, y);
+  u8g2.setCursor(x0, y);
   u8g2.print("S2 A:");
   u8g2.print(g_sensor2Analog);
   u8g2.print(" D:");
@@ -282,13 +281,13 @@ void drawScreen() {
   y += lineH;
 
   // Last key
-  u8g2.setCursor(0, y);
+  u8g2.setCursor(x0, y);
   u8g2.print("Last key: ");
   u8g2.print(g_lastKeyPressed);
   y += lineH;
 
-  u8g2.setCursor(0, y);
-  u8g2.print("Press keys to test debounce");
+  u8g2.setCursor(x0, y);
+  u8g2.print("Press keys to test");
 }
 
 // =============================
