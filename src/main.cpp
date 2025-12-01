@@ -21,8 +21,8 @@
              Digital output -> S1_D0_PIN = 23
              Analog output  -> S1_A0_PIN = 32
            Sensor 2:
-             Digital output -> S2_D0_PIN = 16
-             Analog output  -> S2_A0_PIN = 33
+             Digital output  -> S2_D0_PIN = 16
+             Analog output   -> S2_A0_PIN = 33
          - Analog is read using 12-bit ADC (0..4095) via analogReadResolution(12).
 
   - Output device:
@@ -137,6 +137,25 @@
           - drawWifi() only reads this index and renders the icon.
 
   ==========================================
+  Time display (top bar clock for backend)
+  ==========================================
+
+  - A new global string:
+        String g_timeString
+        Example value: "12:45 PM"
+
+  - drawScreen() prints this time string on the top row,
+    to the left of the WiFi and Battery icons (status bar style).
+
+  - Backend (NTP / RTC / WiFi time sync) should:
+        * Format current time as "hh:mm AM/PM"
+        * Assign it to g_timeString whenever time updates:
+              g_timeString = formattedString;
+
+  - drawScreen() treats g_timeString as view-only and does not
+    attempt to compute time by itself.
+
+  ==========================================
   Current demo behavior (for testing only)
   ==========================================
 
@@ -165,8 +184,10 @@
   - To integrate battery:
       * Add an ADC reading function that samples the battery input,
         applies scaling/filtering, then sets g_batteryLevelIndex.
-  - drawBattery() and drawWifi() should be treated as pure view functions
-    that only read the corresponding global state.
+  - To integrate time:
+      * Add NTP/RTC sync and format "hh:mm AM/PM" into g_timeString.
+  - drawBattery(), drawWifi(), and the time display should be treated
+    as pure view functions that only read the corresponding global state.
 */
 
 #include <Arduino.h>
@@ -232,6 +253,9 @@ uint8_t g_batteryLevelIndex = 4;  // TODO: backend should update based on real b
 //  0 -> no-network symbol (circle with slash)
 //  1..4 -> that many bars
 uint8_t g_wifiLevelIndex = 4;     // TODO: backend should update based on WiFi status/RSSI
+
+// Time string in "hh:mm AM/PM" format (to be updated by backend NTP/RTC code)
+String g_timeString = "12:00AM"; // TODO: backend should set real time here
 
 // =============================
 // OLED Display (U8g2)
@@ -528,7 +552,6 @@ void drawWifi(uint8_t levelIndex) {
     u8g2.drawBox(xLeft, yTop, barW, barH);
   }
 }
-
 void drawScreen() {
   const int16_t x0 = 0;
   int16_t y = 14;
@@ -536,13 +559,33 @@ void drawScreen() {
   // Header: big font
   u8g2.setFont(u8g2_font_10x20_tf);
   u8g2.setCursor(x0, y);
-  u8g2.print("Counter");
+  u8g2.print("D");
 
-  // Top-right status icons
+  // ---- Draw Battery & WiFi first (defines right boundary for time) ----
   drawBattery(g_batteryLevelIndex);
   drawWifi(g_wifiLevelIndex);
 
-  // Move down for data lines
+  // ---- Time on SAME LINE as WiFi/Battery ----
+  u8g2.setFont(u8g2_font_7x13B_tf);
+
+  // WiFi icon bounding box values
+  const uint8_t battW = 18;
+  const uint8_t tipW  = 2;
+  const uint8_t wifiW = 12;
+
+  int16_t battX = 128 - battW - tipW - 1;
+  int16_t wifiX = battX - wifiW - 3;   // 3px gap before battery
+
+  // Time ends just before WiFi icon, with 3px safety gap
+  int16_t timeWidth = u8g2.getStrWidth(g_timeString.c_str());
+  int16_t timeX = wifiX - timeWidth - 3;
+  if (timeX < 0) timeX = 0;
+
+  // -3 aligns 7x13 font vertically with icon top row
+  u8g2.setCursor(timeX, y - 3);
+  u8g2.print(g_timeString);
+
+  // ----- Move down for data lines -----
   y += 16;
 
   // Data: smaller bold font
@@ -566,6 +609,7 @@ void drawScreen() {
   u8g2.print("Last key: ");
   u8g2.print(g_lastKeyPressed);
 }
+
 
 // =============================
 // ISR Implementations
