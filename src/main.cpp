@@ -1,79 +1,172 @@
 /*
-  Project overview for Copilot:
+  Project overview for Copilot (ESP32 + TCRT + Keypad + OLED UI):
 
-  Hardware:
+  ==========================================
+  Hardware summary
+  ==========================================
+
   - MCU: ESP32
-  - 4x push buttons used as a simple keypad:
-      KEY1_PIN = 5
-      KEY2_PIN = 17
-      KEY3_PIN = 19
-      KEY4_PIN = 18
-    Buttons are wired as active-LOW with INPUT_PULLUP and use external interrupts.
+  - Input devices:
+      1) 4x push buttons used as a simple keypad:
+           KEY1_PIN = 5   // Button "1"
+           KEY2_PIN = 17  // Button "2"
+           KEY3_PIN = 19  // Button "3"
+           KEY4_PIN = 18  // Button "4"
+         - Buttons are wired as active-LOW with INPUT_PULLUP.
+         - External interrupts on FALLING edge.
+         - ISRs only set flags; actual handling + debounce is done in loop().
 
-  - 2x TCRT5000 reflective IR sensors:
-      Sensor 1:
-        Digital output -> S1_D0_PIN = 23
-        Analog output  -> S1_A0_PIN = 32
-      Sensor 2:
-        Digital output -> S2_D0_PIN = 16
-        Analog output  -> S2_A0_PIN = 33
-    Analog is read with 12-bit resolution (0..4095) using analogReadResolution(12).
+      2) 2x TCRT5000 reflective IR sensors:
+           Sensor 1:
+             Digital output -> S1_D0_PIN = 23
+             Analog output  -> S1_A0_PIN = 32
+           Sensor 2:
+             Digital output -> S2_D0_PIN = 16
+             Analog output  -> S2_A0_PIN = 33
+         - Analog is read using 12-bit ADC (0..4095) via analogReadResolution(12).
 
-  - OLED display:
-      128x64 SH1106 over I2C
-      Using U8g2 full-buffer driver:
-        U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
-      Default ESP32 I2C pins: SDA = 21, SCL = 22.
+  - Output device:
+      - 128x64 SH1106 OLED over I2C
+        Using U8g2 full-buffer driver:
+          U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+        Default ESP32 I2C pins: SDA = 21, SCL = 22.
 
-  Current software structure:
+  ==========================================
+  UI layout (OLED)
+  ==========================================
+
+  Full screen: 128x64 pixels.
+
+  Top row:
+    - Left side: header text "Counter" in big font (u8g2_font_10x20_tf).
+    - Right side: status icons:
+        [ WiFi icon ] [ Battery icon ]
+
+  WiFi icon (left of battery):
+    - Drawn by drawWifi(uint8_t levelIndex).
+    - Position: top-right area, left of battery, 12x10 approx.
+    - Semantic:
+        levelIndex == 0 → circle with slash "no network" symbol.
+        levelIndex  1-4 → vertical bars like 4G/cellular signal:
+                          1,2,3,4 bars visible (increasing height).
+
+  Battery icon (rightmost):
+    - Drawn by drawBattery(uint8_t levelIndex).
+    - Position: top-right corner.
+    - Rendering:
+        - Battery outline + small terminal on the right.
+        - 5 possible fill bars inside (0..4).
+    - Semantic mapping:
+        levelIndex 0..4 → 0%, 25%, 50%, 75%, 100% battery.
+
+  Middle / bottom area:
+    - Sensor/diagnostic text in smaller bold font (u8g2_font_8x13B_tf):
+        Line 1: "S1 A:<analog> D:<H/L>"
+        Line 2: "S2 A:<analog> D:<H/L>"
+        Line 3: "Last key: <string>"
+
+  ==========================================
+  Software structure (high level)
+  ==========================================
 
   - setup():
-      - setupSerial(): Serial at 460800 baud.
-      - setupDisplay(): u8g2.begin() and set font (base font configured).
-      - setupSensors(): configure TCRT5000 digital pins as INPUT and set ADC resolution.
-      - setupKeypad(): configure button pins as INPUT_PULLUP and attach FALLING-edge interrupts.
+      * setupSerial()
+      * setupDisplay()
+      * setupSensors()
+      * setupKeypad()
 
   - loop():
-      - readSensors():
-          * Reads both analog and digital values for S1 and S2.
-          * Prints structured sensor data over Serial using a custom format
-            intended for a VS Code Serial Plotter plugin (Mario Zechner).
-            Example fields printed: "S1:<analog>, D1:<digital>, S2:<analog>, D2:<digital>".
-      - handleKeypad():
-          * Uses a generic processKey() helper.
-          * ISRs only set volatile flags (g_keyXInterrupt).
-          * processKey() does:
-              - Check interrupt flag
-              - Software debounce using BUTTON_DEBOUNCE_MS and millis()
-              - Confirm button is still LOW
-              - Call the corresponding onKeyXPressed() handler.
-          * onKeyXPressed() updates g_lastKeyPressed ("Key 1", "Key 2", etc.)
-            and logs to Serial.
-      - updateDisplay():
-          * Clears the U8g2 buffer, calls drawScreen(), then sends the buffer.
+      * readSensors()
+          - Reads analog + digital values for both TCRT5000 sensors.
+          - Prints structured values to Serial for use with
+            the VS Code Serial Plotter plugin (Mario Zechner style).
+      * handleKeypad()
+          - Generic processKey() that:
+              - Checks interrupt flags (set by ISRs).
+              - Does software debouncing with BUTTON_DEBOUNCE_MS and millis().
+              - Confirms button is still LOW before calling handler.
+          - Handlers onKey1Pressed()..onKey4Pressed() update global state.
+      * updateDisplay()
+          - Clears U8g2 buffer, calls drawScreen(), then sendBuffer().
 
   - drawScreen():
-      - Uses a big font (u8g2_font_10x20_tf) for the title "Counter".
-      - Shows a 5-segment battery icon in the top-right corner (0–4 bars).
-      - Uses a smaller bold font (u8g2_font_8x13B_tf) for data:
-          * S1 A:<analog> D:<H/L>
-          * S2 A:<analog> D:<H/L>
-          * Last key: <string>
+      * Draws header "Counter".
+      * Draws top-right status icons:
+            drawBattery(g_batteryLevelIndex);
+            drawWifi(g_wifiLevelIndex);
+      * Draws sensor data + last key line.
 
-  Design notes:
-  - Interrupts are IRAM_ATTR and kept minimal (only set flags).
-  - Debouncing and logic are done in the main loop using processKey().
-  - Serial output is structured for an Arduino-like / VS Code serial plotter.
-  - The display code is separated into updateDisplay() + drawScreen() for clarity.
+  ==========================================
+  UI state variables for backend integration
+  ==========================================
 
-  Battery UI:
-  - g_batteryLevelIndex is a 0..4 value corresponding to:
-      0 -> 0%
-      1 -> 25%
-      2 -> 50%
-      3 -> 75%
-      4 -> 100%
-  - drawBattery() draws a 5-bar icon at the top-right of the SH1106 screen.
+  These are the two key globals that backend / WiFi / battery code
+  should update. Copilot should use these when integrating real logic:
+
+    - uint8_t g_batteryLevelIndex
+        Range: 0..4
+        Meaning:
+          0 → 0% / empty
+          1 → ~25%
+          2 → ~50%
+          3 → ~75%
+          4 → ~100%
+        Usage:
+          - Backend code (e.g., reading a battery voltage via ADC)
+            should quantize the real battery level and set this variable.
+          - drawBattery() uses this index purely as a visual.
+
+    - uint8_t g_wifiLevelIndex
+        Range: 0..4
+        Meaning:
+          0 → "no network" (circle with slash)
+          1 → 1 bar (weak)
+          2 → 2 bars
+          3 → 3 bars
+          4 → 4 bars (full / strong)
+        Usage:
+          - Backend WiFi code should:
+              * Set g_wifiLevelIndex = 0 when WiFi is disconnected
+                or connection fails.
+              * Set 1..4 based on RSSI thresholds from WiFi.RSSI().
+                Example mapping (for Copilot implementation):
+                  RSSI <= -80 dBm → 1
+                  -80 < RSSI <= -70 → 2
+                  -70 < RSSI <= -60 → 3
+                  RSSI >  -60        → 4
+          - drawWifi() only reads this index and renders the icon.
+
+  ==========================================
+  Current demo behavior (for testing only)
+  ==========================================
+
+  For now, keypad presses are used ONLY to demo the WiFi icon:
+
+    - Key 1 → g_wifiLevelIndex = 0 (no network symbol, circle with slash)
+    - Key 2 → g_wifiLevelIndex = 1 (1 bar)
+    - Key 3 → g_wifiLevelIndex = 3 (3 bars)
+    - Key 4 → g_wifiLevelIndex = 4 (4 bars, full)
+
+  Battery:
+    - g_batteryLevelIndex is currently fixed at 4 (100%).
+    - This is a placeholder; backend code should overwrite it
+      when the real battery measurement logic is implemented.
+
+  ==========================================
+  Notes for future Copilot assistance
+  ==========================================
+
+  - Keep ISRs minimal (only set flags).
+  - Keep debounce + logic inside handleKeypad()/processKey().
+  - To integrate WiFi:
+      * Add WiFi.begin() etc. in setup().
+      * Periodically read WiFi.status() and WiFi.RSSI() in loop()
+        or a dedicated function, then update g_wifiLevelIndex.
+  - To integrate battery:
+      * Add an ADC reading function that samples the battery input,
+        applies scaling/filtering, then sets g_batteryLevelIndex.
+  - drawBattery() and drawWifi() should be treated as pure view functions
+    that only read the corresponding global state.
 */
 
 #include <Arduino.h>
@@ -133,14 +226,17 @@ uint32_t g_key3LastPressMs = 0;
 uint32_t g_key4LastPressMs = 0;
 
 // Battery level: 0..4 => 0,25,50,75,100%
-uint8_t g_batteryLevelIndex = 4;  // start showing 100%
+uint8_t g_batteryLevelIndex = 4;  // TODO: backend should update based on real battery
+
+// WiFi level/state: 0..4
+//  0 -> no-network symbol (circle with slash)
+//  1..4 -> that many bars
+uint8_t g_wifiLevelIndex = 4;     // TODO: backend should update based on WiFi status/RSSI
 
 // =============================
 // OLED Display (U8g2)
 // =============================
 
-// Full-frame buffer, SH1106 128x64, hardware I2C, no reset pin
-// Uses default SDA=21, SCL=22 on ESP32
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
 // =============================
@@ -163,6 +259,7 @@ void onKey4Pressed();
 
 void drawScreen();
 void drawBattery(uint8_t levelIndex);
+void drawWifi(uint8_t levelIndex);
 
 // ISRs
 void IRAM_ATTR isrKey1();
@@ -198,9 +295,6 @@ void loop() {
   handleKeypad();
   updateDisplay();
 
-  // TODO: later you can update g_batteryLevelIndex based on ADC/battery
-  // For now it's fixed.
-
   delay(LOOP_DELAY_MS);
 }
 
@@ -216,10 +310,7 @@ void setupSerial() {
 }
 
 void setupDisplay() {
-  // Initialize I2C and display
   u8g2.begin();
-
-  // Default font (we switch fonts inside drawScreen())
   u8g2.setFont(u8g2_font_7x13_tf);
 }
 
@@ -309,31 +400,35 @@ void handleKeypad() {
 }
 
 // =============================
-// Button Press Handlers
+// Button Press Handlers (WiFi demo only)
 // =============================
 
+// Key 1 → no-network symbol (circle with slash)
 void onKey1Pressed() {
   g_lastKeyPressed = "Key 1";
-  g_batteryLevelIndex = 0;
-  Serial.println("Key 1 pressed");
+  g_wifiLevelIndex = 0;
+  Serial.println("Key 1 pressed -> WiFi NO NETWORK (circle with slash)");
 }
 
+// Key 2 → 1 bar
 void onKey2Pressed() {
   g_lastKeyPressed = "Key 2";
-  g_batteryLevelIndex = 1;
-  Serial.println("Key 2 pressed");
+  g_wifiLevelIndex = 1;
+  Serial.println("Key 2 pressed -> WiFi 1 bar");
 }
 
+// Key 3 → 3 bars
 void onKey3Pressed() {
   g_lastKeyPressed = "Key 3";
-  g_batteryLevelIndex = 2;
-  Serial.println("Key 3 pressed");
+  g_wifiLevelIndex = 3;
+  Serial.println("Key 3 pressed -> WiFi 3 bars");
 }
 
+// Key 4 → 4 bars (full)
 void onKey4Pressed() {
   g_lastKeyPressed = "Key 4";
-  g_batteryLevelIndex = 3;
-  Serial.println("Key 4 pressed");
+  g_wifiLevelIndex = 4;
+  Serial.println("Key 4 pressed -> WiFi 4 bars (full)");
 }
 
 // =============================
@@ -372,10 +467,65 @@ void drawBattery(uint8_t levelIndex) {
   const uint8_t barW   = 2;
   const uint8_t gap    = 1;
 
-  // Max 5 bars fit in this width
   for (uint8_t i = 0; i <= levelIndex; i++) {
     uint8_t bx = innerX + i * (barW + gap);
     u8g2.drawBox(bx, innerY, barW, innerH);
+  }
+}
+
+// Draw a WiFi/signal icon as vertical bars left of the battery.
+// levelIndex: 0..4
+//  0 -> circle with slash (no network)
+//  1..4 -> that many bars (like 4G)
+void drawWifi(uint8_t levelIndex) {
+  if (levelIndex > 4) levelIndex = 4;
+
+  // Position based on battery so layout stays aligned
+  const uint8_t battW = 18;
+  const uint8_t tipW  = 2;
+  const uint8_t battX = 128 - battW - tipW - 1;
+
+  const uint8_t wifiW = 12;
+  const uint8_t wifiH = 10;
+  const uint8_t wifiX = battX - wifiW - 3;  // small gap (3 px) left of battery
+  const uint8_t wifiY = 1;
+
+  if (levelIndex == 0) {
+    // --- No network: circle with slash ---
+    uint8_t cx = wifiX + wifiW / 2;
+    uint8_t cy = wifiY + wifiH / 2;
+    uint8_t r  = (wifiW < wifiH ? wifiW : wifiH) / 2 - 1;
+
+    // Circle outline
+    u8g2.drawCircle(cx, cy, r);
+
+    // Slash: diagonal line across circle
+    u8g2.drawLine(cx - r, cy - r, cx + r, cy + r);
+    return;
+  }
+
+  // --- Signal bars (1..4) ---
+  const uint8_t bars  = 4;
+  const uint8_t barW  = 2;
+  const uint8_t gap   = 1;
+  const uint8_t baseY = wifiY + wifiH - 1; // bottom baseline
+
+  // Right-aligned bars: smallest on left, tallest on right (like cellular icon)
+  for (uint8_t i = 0; i < bars; i++) {
+    uint8_t barIndex = i + 1; // 1..4
+    if (barIndex > levelIndex) {
+      continue; // don't draw bars above the current level
+    }
+
+    // Height increments: 3, 5, 7, 9 pixels
+    uint8_t barH = 3 + (2 * i);
+
+    // From right to left
+    uint8_t xRight = wifiX + wifiW - 1 - (bars - 1 - i) * (barW + gap);
+    uint8_t xLeft  = xRight - barW + 1;
+    uint8_t yTop   = baseY - barH + 1;
+
+    u8g2.drawBox(xLeft, yTop, barW, barH);
   }
 }
 
@@ -388,8 +538,9 @@ void drawScreen() {
   u8g2.setCursor(x0, y);
   u8g2.print("Counter");
 
-  // Battery icon on top-right
+  // Top-right status icons
   drawBattery(g_batteryLevelIndex);
+  drawWifi(g_wifiLevelIndex);
 
   // Move down for data lines
   y += 16;
