@@ -1,8 +1,80 @@
-// #include <Adafruit_GFX.h>
-// #include <Adafruit_SH1106.h>
-// =============================
-// Pin Definitions
-// =============================
+/*
+  Project overview for Copilot:
+
+  Hardware:
+  - MCU: ESP32
+  - 4x push buttons used as a simple keypad:
+      KEY1_PIN = 5
+      KEY2_PIN = 17
+      KEY3_PIN = 19
+      KEY4_PIN = 18
+    Buttons are wired as active-LOW with INPUT_PULLUP and use external interrupts.
+
+  - 2x TCRT5000 reflective IR sensors:
+      Sensor 1:
+        Digital output -> S1_D0_PIN = 23
+        Analog output  -> S1_A0_PIN = 32
+      Sensor 2:
+        Digital output -> S2_D0_PIN = 16
+        Analog output  -> S2_A0_PIN = 33
+    Analog is read with 12-bit resolution (0..4095) using analogReadResolution(12).
+
+  - OLED display:
+      128x64 SH1106 over I2C
+      Using U8g2 full-buffer driver:
+        U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+      Default ESP32 I2C pins: SDA = 21, SCL = 22.
+
+  Current software structure:
+
+  - setup():
+      - setupSerial(): Serial at 460800 baud.
+      - setupDisplay(): u8g2.begin() and set font (base font configured).
+      - setupSensors(): configure TCRT5000 digital pins as INPUT and set ADC resolution.
+      - setupKeypad(): configure button pins as INPUT_PULLUP and attach FALLING-edge interrupts.
+
+  - loop():
+      - readSensors():
+          * Reads both analog and digital values for S1 and S2.
+          * Prints structured sensor data over Serial using a custom format
+            intended for a VS Code Serial Plotter plugin (Mario Zechner).
+            Example fields printed: "S1:<analog>, D1:<digital>, S2:<analog>, D2:<digital>".
+      - handleKeypad():
+          * Uses a generic processKey() helper.
+          * ISRs only set volatile flags (g_keyXInterrupt).
+          * processKey() does:
+              - Check interrupt flag
+              - Software debounce using BUTTON_DEBOUNCE_MS and millis()
+              - Confirm button is still LOW
+              - Call the corresponding onKeyXPressed() handler.
+          * onKeyXPressed() updates g_lastKeyPressed ("Key 1", "Key 2", etc.)
+            and logs to Serial.
+      - updateDisplay():
+          * Clears the U8g2 buffer, calls drawScreen(), then sends the buffer.
+
+  - drawScreen():
+      - Uses a big font (u8g2_font_10x20_tf) for the title "TCRT + Keypad".
+      - Uses a smaller bold font (u8g2_font_8x13B_tf) for data.
+      - Displays:
+          * S1 A:<analog> D:<H/L>
+          * S2 A:<analog> D:<H/L>
+          * Last key: <string>
+      - Coordinates chosen to fit cleanly on a 128x64 display with SH1106 driver
+        (we previously fixed left-shift / garbage-column issues by using the
+        correct U8g2 constructor for SH1106).
+
+  Design notes:
+  - Interrupts are IRAM_ATTR and kept minimal (only set flags).
+  - Debouncing and logic are done in the main loop using processKey().
+  - Serial output is structured for an Arduino-like / VS Code serial plotter.
+  - The display code is separated into updateDisplay() + drawScreen() for clarity.
+
+  Next steps (for Copilot to help with later):
+  - Add additional UI screens (e.g., raw ADC values, threshold settings, live graph bars).
+  - Implement calibration / threshold adjustment for TCRT5000 using keypad.
+  - Possibly add a menu system driven by the four keys.
+  - Keep the existing interrupt + debounce pattern and U8g2 drawing style.
+*/
 
 #include <Arduino.h>
 #include <Wire.h>
