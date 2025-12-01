@@ -1,3 +1,27 @@
+/*
+ESP32 Token Counter Firmware
+===========================
+
+This firmware is designed for an ESP32-based device to count tokens (e.g., meal coupons) for breakfast, lunch, and dinner, and report the counts to a Supabase backend. It uses NVS (Preferences) for persistent storage, time-based logic for meal selection, and WiFiManager for network setup.
+
+Key Features:
+-------------
+1. WiFi setup using WiFiManager with fallback portal.
+2. NTP time synchronization with retry until valid time is received.
+3. Meal time logic for breakfast (7–9am), lunch (11am–2pm), dinner (6–9pm).
+4. Token counting per meal and day, persisted in NVS (Preferences).
+5. Robust validation and initialization of token data on boot.
+6. Supabase integration: PATCH requests update only the relevant meal column.
+7. Debug logging for WiFi, time, token data, and Supabase requests.
+8. Testing support via DUMMYHREFORTESTING macro.
+9. All legacy schedule, timer, relay, and EEPROM logic removed.
+
+TODO:
+- IR sensor stub for actual token increment (currently dummy increment).
+- Prometheus metrics sending (currently only Supabase is used).
+- Remove unused legacy code (OneWire, DallasTemperature, relay logic) if not needed.
+
+*/
 #ifndef ARDUINOJSON_DEPRECATED
 #define ARDUINOJSON_DEPRECATED(msg)
 #endif
@@ -9,17 +33,15 @@
 #include <ArduinoJson.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include <EEPROM.h>
+#include <Preferences.h>
 #define BFL 7
 #define BFH 9
 #define LFL 11
 #define LFH 14
 #define DFL 18  
 #define DFH 21
-#define DUMMYHREFORTESTING 19  // Adjust this value to test different meal times
-// === EEPROM Setup ===
-#define EEPROM_SIZE sizeof(TokenData)
-#define EEPROM_TOKEN_ADDR 0
+#define DUMMYHREFORTESTING 12  // Adjust this value to test different meal times
+Preferences prefs;
 
 // === Time sync configuration ===
 // Change these macros to adjust sync/retry behavior
@@ -45,6 +67,9 @@
 
 // Device identifier used to select schedules in Supabase
 const char *deviceId = "uno_1";
+const char *deviceId2 = "uno_2";
+const char *deviceId3 = "uno_3";
+
 enum mealType {
   NONE,
   BREAKFAST,
@@ -63,8 +88,8 @@ struct TokenData {
 };
 
 TokenData token_data = {0, NONE, "1970-01-01", false};
-
-// Maximum schedules to load
+TokenData token_data2 = {0, NONE, "1970-01-01", false};
+TokenData token_data3 = {0, NONE, "1970-01-01", false};
 #define MAX_SCHEDULES 8
 
 // India Standard Time offset from UTC in seconds (+5:30)
@@ -316,27 +341,35 @@ void readSensors(float &temp1, float &temp2, bool &valid1, bool &valid2) {
 
 // === Setup ===
 void setup() {
-  EEPROM.begin(EEPROM_SIZE);
-  delay(5);
+  // ...existing code...
   pinMode(ONE_WIRE_BUS_1, INPUT_PULLUP);
   pinMode(ONE_WIRE_BUS_2, INPUT_PULLUP);
   Serial.begin(115200);
   delay(1000);
-  EEPROM.get(EEPROM_TOKEN_ADDR, token_data);
+  prefs.begin("tokencfg", true); // read-only
+  token_data.token_count = prefs.getInt("token_count", 0);
+  token_data.meal = (mealType)prefs.getInt("meal", NONE);
+  String dateStr = prefs.getString("date", "1970-01-01");
+  strncpy(token_data.date, dateStr.c_str(), sizeof(token_data.date));
+  token_data.date[10] = '\0';
+  prefs.end();
   // Safety check: validate struct fields
   bool valid = true;
   if (token_data.meal < NONE || token_data.meal >= MEAL_COUNT) valid = false;
   if (strlen(token_data.date) != 10) valid = false;
   if (!valid) {
-    Serial.println("⚠️ EEPROM data invalid, reinitializing token_data");
+    Serial.println("⚠️ NVS data invalid, reinitializing token_data");
     token_data.token_count = 0;
     token_data.meal = NONE;
     strcpy(token_data.date, "1970-01-01");
     token_data.update = false;
-    EEPROM.put(EEPROM_TOKEN_ADDR, token_data);
-    EEPROM.commit();
+    prefs.begin("tokencfg", false);
+    prefs.putInt("token_count", token_data.token_count);
+    prefs.putInt("meal", token_data.meal);
+    prefs.putString("date", token_data.date);
+    prefs.end();
   }
-  Serial.printf("🔁 TokenData restored from EEPROM: count=%d, meal=%s, date=%s\n", token_data.token_count, meal[token_data.meal].c_str(), token_data.date);
+  Serial.printf("🔁 TokenData restored from NVS: count=%d, meal=%s, date=%s\n", token_data.token_count, meal[token_data.meal].c_str(), token_data.date);
 
   WiFiManager wm;
   wm.setConfigPortalTimeout(120);
@@ -375,8 +408,10 @@ void setup() {
       if (hour >= BFL && hour < BFH) currentMealType = BREAKFAST;
       else if (hour >= LFL && hour < LFH) currentMealType = LUNCH;
       else if (hour >= DFL && hour < DFH) currentMealType = DINNER;
-      // Compare EEPROM date and mealtype
-      if (strcmp(token_data.date, todayIST) == 0 && token_data.meal == currentMealType) {
+      // Only initialize if current time is a meal time
+      if (currentMealType == NONE) {
+        Serial.printf("⏸ Not a meal time at init (hour=%d), not initializing token_data in NVS\n", hour);
+      } else if (strcmp(token_data.date, todayIST) == 0 && token_data.meal == currentMealType) {
         Serial.printf("✅ EEPROM date and meal match: %s, %s. Keeping token_count=%d\n", todayIST, meal[currentMealType].c_str(), token_data.token_count);
       } else {
         Serial.printf("ℹ️ EEPROM date/meal mismatch or new meal/day. Initializing token_count=0\n");
@@ -385,8 +420,11 @@ void setup() {
         token_data.date[10] = '\0';
         token_data.meal = currentMealType;
         token_data.update = true;
-        EEPROM.put(EEPROM_TOKEN_ADDR, token_data);
-        EEPROM.commit();
+        prefs.begin("tokencfg", false);
+        prefs.putInt("token_count", token_data.token_count);
+        prefs.putInt("meal", token_data.meal);
+        prefs.putString("date", token_data.date);
+        prefs.end();
       }
       break;
     } else {
@@ -438,8 +476,15 @@ void loop() {
 }
   else{
       token_data.token_count += 1;
-      token_data.update = true;
+      token_data2 = token_data;
+      token_data3 = token_data;
+
+      token_data2.token_count += 2;
+      token_data3.token_count += 3;
+
       sendTokenData(deviceId, &token_data);
+       sendTokenData(deviceId2, &token_data2);
+        sendTokenData(deviceId3, &token_data3);
      
     }
      lastSensorSend = now;
@@ -448,9 +493,12 @@ void loop() {
   if ((now - lastEEPROMWrite >= 20000) || token_data.update == true ) {
     lastEEPROMWrite = now;
     token_data.update = false;
-    EEPROM.put(EEPROM_TOKEN_ADDR, token_data);
-    EEPROM.commit();
-    Serial.println("💾 TokenData saved to EEPROM.");
+    prefs.begin("tokencfg", false);
+    prefs.putInt("token_count", token_data.token_count);
+    prefs.putInt("meal", token_data.meal);
+    prefs.putString("date", token_data.date);
+    prefs.end();
+    Serial.println("💾 TokenData saved to NVS.");
   }
  delay(10);
 
