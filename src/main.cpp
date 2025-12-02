@@ -298,6 +298,8 @@
 #define TIME_SYNC_ATTEMPT_TIMEOUT_MS 10000UL
 #endif
 
+#define TIME_SYNC_DATA_INTERVAL_MS 10000UL // 10 seconds
+
 // India Standard Time offset from UTC in seconds (+5:30)
 static const long IST_OFFSET_SECONDS = 5 * 3600 + 30 * 60;
 
@@ -369,6 +371,8 @@ enum mealType {
 String meal[MEAL_COUNT] = {"none", "breakfast", "lunch", "dinner"};
 mealType currentMeal = NONE;
 
+
+
 struct TokenData {
   int token_count;
   mealType meal;
@@ -380,6 +384,20 @@ TokenData token_data = {0, NONE, "1970-01-01", false};
 TokenData token_data2 = {0, NONE, "1970-01-01", false};
 TokenData token_data3 = {0, NONE, "1970-01-01", false};
 Preferences prefs;
+// =============================
+// HTTP send queue + background task
+// =============================
+
+struct SendJob {
+  const char *deviceId;  // "uno_1", "uno_2", "uno_3"
+  TokenData   data;      // copy of token_data (small struct)
+};
+
+// Queue handle for pending HTTP jobs
+QueueHandle_t g_sendQueue = nullptr;
+
+// Forward declaration
+void httpSenderTask(void *pvParameters);
 
 
 // fetchNetworkTime must be defined before TimeManager uses it
@@ -497,23 +515,46 @@ private:
 };
 
 TimeManager timeManager;
-
-void sendTokenData(String id, TokenData * token_data) {
+void httpSenderTask(void *pvParameters) ;
+void sendTokenData(const char *id, const TokenData *token_data) ;
+void sendTokenData(const char *id, const TokenData *token_data) {
   if (WiFi.status() != WL_CONNECTED) return;
+
   HTTPClient http;
+
+  // Optional: shorter timeout so even the HTTP task doesn't block forever
+  http.setTimeout(1000);  // 1s timeout instead of long default
+
   String url = String(postURL) + "?sensor_id=eq." + id + "&date=eq." + token_data->date;
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("apikey", apikey);
   http.addHeader("Authorization", "Bearer " + String(apikey));
   http.addHeader("Prefer", "return=representation");
+
   StaticJsonDocument<256> doc;
   doc[meal[token_data->meal]] = token_data->token_count;
   String payload;
   serializeJson(doc, payload);
-  int code = http.sendRequest("PATCH", payload);
+
+  int code = http.sendRequest("PATCH", payload);  // blocking, but only in HTTP task now
   http.end();
+
+  Serial.printf("HTTP send (%s) -> code %d\n", id, code);
 }
+
+void httpSenderTask(void *pvParameters) {
+  SendJob job;
+  for (;;) {
+    // Block here until there is a job
+    if (xQueueReceive(g_sendQueue, &job, portMAX_DELAY) == pdTRUE) {
+      // Do the blocking HTTP call in this background task
+      sendTokenData(job.deviceId, &job.data);
+    }
+    // loop again and wait for the next job
+  }
+}
+
 
 void checkWiFi() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -660,6 +701,26 @@ void setup() {
     }
   }
 
+  // ... after WiFiManager / NTP init is finished ...
+
+  // Create a queue for up to 10 send jobs
+  g_sendQueue = xQueueCreate(10, sizeof(SendJob));
+  if (g_sendQueue == nullptr) {
+    Serial.println("ERROR: Failed to create send queue!");
+  } else {
+    // Create background HTTP sender task on core 1 (typical for Arduino loop on core 1)
+    xTaskCreatePinnedToCore(
+      httpSenderTask,      // task function
+      "httpSender",        // name
+      8192,                // stack size (bytes)
+      nullptr,             // parameter
+      1,                   // priority (low/medium)
+      nullptr,             // task handle
+      1                    // core ID (0 or 1; often 1 works fine)
+    );
+  }
+
+
   Serial.println("System initialized.");
 }
 
@@ -716,11 +777,20 @@ void loop() {
     token_data2.token_count += 2;
     token_data3.token_count += 3;
     // Send to backend every 10s
-    if (now - lastSensorSend >= 10000) {
-      sendTokenData(deviceId, &token_data);
-      // sendTokenData(deviceId2, &token_data2);
-      // sendTokenData(deviceId3, &token_data3);
+    // Enqueue sends every 10s (non-blocking for main loop)
+    if ((now - lastSensorSend) >= TIME_SYNC_DATA_INTERVAL_MS) {   // 10,000 ms = 10 s
       lastSensorSend = now;
+
+      if (g_sendQueue != nullptr) {
+        SendJob job1{ deviceId,  token_data };
+        SendJob job2{ deviceId2, token_data2 };
+        SendJob job3{ deviceId3, token_data3 };
+
+        // 0 tick wait → if queue is full, drop silently (or add debug prints)
+        xQueueSend(g_sendQueue, &job1, 0);
+        xQueueSend(g_sendQueue, &job2, 0);
+        xQueueSend(g_sendQueue, &job3, 0);
+      }
     }
   }
 
@@ -851,16 +921,16 @@ void readSensors() {
 
     // Serial debug output (for plotting / diagnostics)
     Serial.print(">");
-    Serial.print("S1A:");
-    Serial.print(g_sensor1Analog);
-    Serial.print(",D1:");
-    Serial.print(g_sensor1Digital);
-    Serial.print(",S2A:");
-    Serial.print(g_sensor2Analog);
-    Serial.print(",D2:");
-    Serial.print(g_sensor2Digital);
-    Serial.print(",CNT:");
-    Serial.println(g_tokenCount);
+    // Serial.print("S1A:");
+    // Serial.print(g_sensor1Analog);
+    // Serial.print(",D1:");
+    // Serial.print(g_sensor1Digital);
+    // Serial.print(",S2A:");
+    // Serial.print(g_sensor2Analog);
+    // Serial.print(",D2:");
+    // Serial.print(g_sensor2Digital);
+    // Serial.print(",CNT:");
+    // Serial.println(g_tokenCount);
   }
 }
 
