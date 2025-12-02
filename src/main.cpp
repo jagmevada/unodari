@@ -273,7 +273,7 @@
 #define IR_HTH                 2700   // high threshold for Schmitt trigger
 
 // Time window for OR-ing between two sensors (ms)
-#define TOKEN_MERGE_WINDOW_MS  90UL    // if events are closer than this, count as one token
+#define TOKEN_MERGE_WINDOW_MS  110UL    // if events are closer than this, count as one token
 
 // Meal window macros (IST)
 #define BFL 7
@@ -302,7 +302,10 @@
 
 // India Standard Time offset from UTC in seconds (+5:30)
 static const long IST_OFFSET_SECONDS = 5 * 3600 + 30 * 60;
-
+volatile unsigned long now=0; // current time in loop
+volatile unsigned long lastWiFiCheck = 0;
+volatile unsigned long lastEEPROMWrite = 0;
+volatile unsigned long lastSensorSend = 0;
 // =============================
 // Global State
 // =============================
@@ -321,6 +324,9 @@ bool g_s2HighRegion = true;
 int  g_tokenCount = 0;
 // Bundle +10 flag (Key2 sets, then next token event uses +10 and clears it)
 bool g_addBundle10 = false;
+
+// Track previous token count for immediate HTTP send
+int g_tokenCountPrevious = 0;
 
 // Last time we sampled the analog IR (for 1ms sampling)
 uint32_t g_lastIrSampleMs = 0;
@@ -703,8 +709,8 @@ void setup() {
 
   // ... after WiFiManager / NTP init is finished ...
 
-  // Create a queue for up to 10 send jobs
-  g_sendQueue = xQueueCreate(10, sizeof(SendJob));
+  // Create a queue for up to 3 send jobs
+  g_sendQueue = xQueueCreate(3, sizeof(SendJob));
   if (g_sendQueue == nullptr) {
     Serial.println("ERROR: Failed to create send queue!");
   } else {
@@ -729,10 +735,8 @@ void setup() {
 // =============================
 
 void loop() {
-  static unsigned long lastWiFiCheck = 0;
-  static unsigned long lastEEPROMWrite = 0;
-  static unsigned long lastSensorSend = 0;
-  unsigned long now = millis();
+
+  now = millis();
 
   // WiFi check every 10s
   if (now - lastWiFiCheck > 10000) {
@@ -776,20 +780,28 @@ void loop() {
     token_data3 = token_data;
     token_data2.token_count += 2;
     token_data3.token_count += 3;
+
     // Send to backend every 10s
     // Enqueue sends every 10s (non-blocking for main loop)
-    if ((now - lastSensorSend) >= TIME_SYNC_DATA_INTERVAL_MS) {   // 10,000 ms = 10 s
+    if (((now - lastSensorSend) >= TIME_SYNC_DATA_INTERVAL_MS) ||((g_tokenCount != g_tokenCountPrevious) && (now - lastSensorSend) >= 1000)) {   // 10,000 ms = 10 s
       lastSensorSend = now;
-
+        g_tokenCountPrevious = g_tokenCount;
+      Serial.println("updated");
       if (g_sendQueue != nullptr) {
         SendJob job1{ deviceId,  token_data };
-        SendJob job2{ deviceId2, token_data2 };
-        SendJob job3{ deviceId3, token_data3 };
-
-        // 0 tick wait → if queue is full, drop silently (or add debug prints)
+        // If queue is full, remove the oldest job before sending the new one
+        if (uxQueueSpacesAvailable(g_sendQueue) == 0) {
+          SendJob dummy;
+          xQueueReceive(g_sendQueue, &dummy, 0); // remove oldest job
+        }
         xQueueSend(g_sendQueue, &job1, 0);
-        xQueueSend(g_sendQueue, &job2, 0);
-        xQueueSend(g_sendQueue, &job3, 0);
+        // Repeat for other jobs if needed
+        // SendJob job2{ deviceId2, token_data2 };
+        // if (uxQueueSpacesAvailable(g_sendQueue) == 0) { xQueueReceive(g_sendQueue, &dummy, 0); }
+        // xQueueSend(g_sendQueue, &job2, 0);
+        // SendJob job3{ deviceId3, token_data3 };
+        // if (uxQueueSpacesAvailable(g_sendQueue) == 0) { xQueueReceive(g_sendQueue, &dummy, 0); }
+        // xQueueSend(g_sendQueue, &job3, 0);
       }
     }
   }
