@@ -25,6 +25,11 @@
              Analog output   -> S2_A0_PIN = 33
          - Analog is read using 12-bit ADC (0..4095) via analogReadResolution(12).
 
+         IMPORTANT (current token counter implementation):
+         - Token detection uses ONLY the analog inputs (S1_A0_PIN, S2_A0_PIN).
+         - Digital inputs (S1_D0_PIN, S2_D0_PIN) are still read for debug but
+           are NOT used for counting.
+
   - Output device:
       - 128x64 SH1106 OLED over I2C
         Using U8g2 full-buffer driver:
@@ -38,9 +43,9 @@
   Full screen: 128x64 pixels.
 
   Top row:
-    - Left side: header text "Counter" in big font (u8g2_font_10x20_tf).
-    - Right side: status icons:
-        [ WiFi icon ] [ Battery icon ]
+    - Left side: header text "D" in big font (u8g2_font_10x20_tf).
+    - Right side: status icons + time:
+        [ Time "hh:mm AM/PM" ] [ WiFi icon ] [ Battery icon ]
 
   WiFi icon (left of battery):
     - Drawn by drawWifi(uint8_t levelIndex).
@@ -59,11 +64,17 @@
     - Semantic mapping:
         levelIndex 0..4 → 0%, 25%, 50%, 75%, 100% battery.
 
-  Middle / bottom area:
+  Middle / bottom area (original design):
     - Sensor/diagnostic text in smaller bold font (u8g2_font_8x13B_tf):
         Line 1: "S1 A:<analog> D:<H/L>"
         Line 2: "S2 A:<analog> D:<H/L>"
         Line 3: "Last key: <string>"
+
+  NOTE (current version – token counter UI):
+    - The middle/bottom area is now used to display a large **token count**
+      (0..9999) using u8g2_font_logisoso32_tf.
+    - Sensor values and last key information are still kept in code and printed
+      to Serial for diagnostics, but not shown on OLED in this revision.
 
   ==========================================
   Software structure (high level)
@@ -78,29 +89,33 @@
   - loop():
       * readSensors()
           - Reads analog + digital values for both TCRT5000 sensors.
+          - Runs analog-based Schmitt-trigger logic on each 1ms sample to
+            detect fast dips.
+          - Applies OR logic between sensors within a small time window
+            to decide if it is one token or two.
+          - Updates g_tokenCount accordingly.
           - Prints structured values to Serial for use with
             the VS Code Serial Plotter plugin (Mario Zechner style).
       * handleKeypad()
-          - Generic processKey() that:
+          - processKey() pattern:
               - Checks interrupt flags (set by ISRs).
               - Does software debouncing with BUTTON_DEBOUNCE_MS and millis().
               - Confirms button is still LOW before calling handler.
-          - Handlers onKey1Pressed()..onKey4Pressed() update global state.
+          - Handlers onKey1Pressed()..onKey4Pressed() update token counter
+            and bundle mode (Key1 reset, Key2 +10-bundle, Key3/4 reserved).
       * updateDisplay()
           - Clears U8g2 buffer, calls drawScreen(), then sendBuffer().
 
   - drawScreen():
-      * Draws header "Counter".
-      * Draws top-right status icons:
-            drawBattery(g_batteryLevelIndex);
-            drawWifi(g_wifiLevelIndex);
-      * Draws sensor data + last key line.
+      * Draws header "D".
+      * Draws time string, WiFi icon, battery icon on the same top row.
+      * Draws the token count (0..9999) in a large, centered font.
 
   ==========================================
   UI state variables for backend integration
   ==========================================
 
-  These are the two key globals that backend / WiFi / battery code
+  These are the key globals that backend / WiFi / battery / time / counter code
   should update. Copilot should use these when integrating real logic:
 
     - uint8_t g_batteryLevelIndex
@@ -111,10 +126,6 @@
           2 → ~50%
           3 → ~75%
           4 → ~100%
-        Usage:
-          - Backend code (e.g., reading a battery voltage via ADC)
-            should quantize the real battery level and set this variable.
-          - drawBattery() uses this index purely as a visual.
 
     - uint8_t g_wifiLevelIndex
         Range: 0..4
@@ -124,23 +135,28 @@
           2 → 2 bars
           3 → 3 bars
           4 → 4 bars (full / strong)
+
+    - String g_timeString
+        Meaning:
+          - Formatted local time string, e.g. "07:45 PM".
+
+    - int g_tokenCount
+        Range: 0..9999
+        Meaning:
+          - Main token / coupon count shown in large font.
         Usage:
-          - Backend WiFi code should:
-              * Set g_wifiLevelIndex = 0 when WiFi is disconnected
-                or connection fails.
-              * Set 1..4 based on RSSI thresholds from WiFi.RSSI().
-                Example mapping (for Copilot implementation):
-                  RSSI <= -80 dBm → 1
-                  -80 < RSSI <= -70 → 2
-                  -70 < RSSI <= -60 → 3
-                  RSSI >  -60        → 4
-          - drawWifi() only reads this index and renders the icon.
+          - Automatically updated from analog IR events.
+          - Backend / EEPROM can also set/restore it.
+
+    - bool g_addBundle10
+        Meaning:
+          - If true, the next valid token event increments by +10 instead of +1.
 
   ==========================================
   Time display (top bar clock for backend)
   ==========================================
 
-  - A new global string:
+  - A global string:
         String g_timeString
         Example value: "12:45 PM"
 
@@ -149,45 +165,68 @@
 
   - Backend (NTP / RTC / WiFi time sync) should:
         * Format current time as "hh:mm AM/PM"
-        * Assign it to g_timeString whenever time updates:
-              g_timeString = formattedString;
-
-  - drawScreen() treats g_timeString as view-only and does not
-    attempt to compute time by itself.
+        * Assign it to g_timeString whenever time updates.
 
   ==========================================
-  Current demo behavior (for testing only)
+  Token counter logic (ANALOG + Schmitt trigger + OR window)
   ==========================================
 
-  For now, keypad presses are used ONLY to demo the WiFi icon:
+  - Sampling:
+        - Analog inputs S1_A0_PIN and S2_A0_PIN are sampled every 1ms.
+        - Sampling rate is controlled by IR_SAMPLE_INTERVAL_MS (macro).
 
-    - Key 1 → g_wifiLevelIndex = 0 (no network symbol, circle with slash)
-    - Key 2 → g_wifiLevelIndex = 1 (1 bar)
-    - Key 3 → g_wifiLevelIndex = 3 (3 bars)
-    - Key 4 → g_wifiLevelIndex = 4 (4 bars, full)
+  - Schmitt trigger thresholds (macros):
+        - IR_LTH = 2200  (Low threshold)
+        - IR_HTH = 2700  (High threshold)
+        - The idea:
+            * When a sensor is "idle" (HIGH side), its analog value is above IR_HTH.
+            * When a fast object passes, the value briefly dips below IR_LTH.
 
-  Battery:
-    - g_batteryLevelIndex is currently fixed at 4 (100%).
-    - This is a placeholder; backend code should overwrite it
-      when the real battery measurement logic is implemented.
+        - Per-sensor state:
+            * Start in HIGH region (idle).
+            * If in HIGH region and analog <= IR_LTH → this is a local event,
+              and state moves to LOW region.
+            * If in LOW region and analog >= IR_HTH → re-arm back to HIGH region.
+            * This gives hysteresis and noise immunity.
+
+  - OR-ing between sensors with time window:
+        - Macro TOKEN_MERGE_WINDOW_MS = 5ms.
+        - If a sensor's Schmitt trigger reports a local event at time t,
+          we compare t against the last global token event timestamp:
+              if (t - lastTokenEventTime >= TOKEN_MERGE_WINDOW_MS)
+                  → This is a **new** token → count up (+1 or +10).
+                  → lastTokenEventTime = t.
+              else
+                  → This sensor event is considered the same physical token
+                    (e.g., passing through both sensors nearly together),
+                    so we ignore it and do not increment.
+
+        - Effect:
+            * If both sensors are triggered within 5ms → counted as **one token**.
+            * If they are triggered outside the 5ms window → counted as
+              **two separate tokens inserted**.
+
+  - Keypad mapping:
+        * Key 1:
+            - Reset counter to zero (g_tokenCount = 0).
+        * Key 2:
+            - Enable bundle mode (+10 on next token event).
+            - Sets g_addBundle10 = true (one-shot).
+        * Key 3:
+            - Reserved (only updates g_lastKeyPressed).
+        * Key 4:
+            - Reserved (only updates g_lastKeyPressed).
 
   ==========================================
   Notes for future Copilot assistance
   ==========================================
 
-  - Keep ISRs minimal (only set flags).
-  - Keep debounce + logic inside handleKeypad()/processKey().
-  - To integrate WiFi:
-      * Add WiFi.begin() etc. in setup().
-      * Periodically read WiFi.status() and WiFi.RSSI() in loop()
-        or a dedicated function, then update g_wifiLevelIndex.
-  - To integrate battery:
-      * Add an ADC reading function that samples the battery input,
-        applies scaling/filtering, then sets g_batteryLevelIndex.
-  - To integrate time:
-      * Add NTP/RTC sync and format "hh:mm AM/PM" into g_timeString.
-  - drawBattery(), drawWifi(), and the time display should be treated
-    as pure view functions that only read the corresponding global state.
+  - All IR counting logic is analog-based now; digital inputs are for optional
+    diagnostics only.
+  - If needed, IR_LTH / IR_HTH / IR_SAMPLE_INTERVAL_MS / TOKEN_MERGE_WINDOW_MS
+    can be tuned for your mechanics and optics.
+  - When integrating WiFi, battery, or time, only update the corresponding
+    global variables; the drawing functions are pure "view".
 */
 
 #include <Arduino.h>
@@ -205,12 +244,12 @@
 #define KEY4_PIN  18   // Button "4"
 
 // TCRT5000 Sensor 1
-#define S1_D0_PIN 23
-#define S1_A0_PIN 32
+#define S1_D0_PIN 23   // Digital (not used for counting)
+#define S1_A0_PIN 32   // Analog (used for counting)
 
 // TCRT5000 Sensor 2
-#define S2_D0_PIN 16
-#define S2_A0_PIN 33
+#define S2_D0_PIN 16   // Digital (not used for counting)
+#define S2_A0_PIN 33   // Analog (used for counting)
 
 // I2C pins for ESP32 (OLED) - hardware default: SDA=21, SCL=22
 
@@ -218,20 +257,43 @@
 // Config Macros
 // =============================
 
-#define BUTTON_DEBOUNCE_MS  50UL   // debounce time for keypad (in ms)
-#define LOOP_DELAY_MS       10UL   // main loop delay
+#define BUTTON_DEBOUNCE_MS     50UL   // debounce time for keypad (in ms)
+#define LOOP_DELAY_MS          1UL    // main loop delay, keep small for fast sampling
+
+// Analog sampling and Schmitt trigger thresholds for IR
+#define IR_SAMPLE_INTERVAL_MS  1UL    // sample analog inputs every 1ms
+#define IR_LTH                 2200   // low threshold for Schmitt trigger
+#define IR_HTH                 2700   // high threshold for Schmitt trigger
+
+// Time window for OR-ing between two sensors (ms)
+#define TOKEN_MERGE_WINDOW_MS  90UL    // if events are closer than this, count as one token
 
 // =============================
 // Global State
 // =============================
 
-// Sensor readings
+// Sensor readings (for debug / plotting)
 int  g_sensor1Analog = 0;
 int  g_sensor2Analog = 0;
 bool g_sensor1Digital = false;
 bool g_sensor2Digital = false;
 
-// Last pressed key info (for display)
+// Schmitt trigger state for each sensor (true = high region, false = low region)
+bool g_s1HighRegion = true;
+bool g_s2HighRegion = true;
+
+// Token counter 0..9999
+int  g_tokenCount = 0;
+// Bundle +10 flag (Key2 sets, then next token event uses +10 and clears it)
+bool g_addBundle10 = false;
+
+// Last time we sampled the analog IR (for 1ms sampling)
+uint32_t g_lastIrSampleMs = 0;
+
+// Last time any token event was counted (for OR-window between sensors)
+uint32_t g_lastTokenEventMs = 0;
+
+// Last pressed key info (for debug/Serial/logging)
 String g_lastKeyPressed = "None";
 
 // Interrupt flags for buttons (set in ISR, handled in loop)
@@ -240,7 +302,7 @@ volatile bool g_key2Interrupt = false;
 volatile bool g_key3Interrupt = false;
 volatile bool g_key4Interrupt = false;
 
-// Debounce timestamps
+// Debounce timestamps for keypad
 uint32_t g_key1LastPressMs = 0;
 uint32_t g_key2LastPressMs = 0;
 uint32_t g_key3LastPressMs = 0;
@@ -255,7 +317,7 @@ uint8_t g_batteryLevelIndex = 4;  // TODO: backend should update based on real b
 uint8_t g_wifiLevelIndex = 4;     // TODO: backend should update based on WiFi status/RSSI
 
 // Time string in "hh:mm AM/PM" format (to be updated by backend NTP/RTC code)
-String g_timeString = "12:00AM"; // TODO: backend should set real time here
+String g_timeString = "12:00 AM"; // TODO: backend should set real time here
 
 // =============================
 // OLED Display (U8g2)
@@ -315,9 +377,9 @@ void setup() {
 // =============================
 
 void loop() {
-  readSensors();
-  handleKeypad();
-  updateDisplay();
+  readSensors();   // analog-based token detection + Serial debug
+  handleKeypad();  // keypad + bundle/reset logic
+  updateDisplay(); // draw status bar + big counter
 
   delay(LOOP_DELAY_MS);
 }
@@ -335,6 +397,7 @@ void setupSerial() {
 
 void setupDisplay() {
   u8g2.begin();
+  // Default font can be small; specific fonts are set in drawScreen()
   u8g2.setFont(u8g2_font_7x13_tf);
 }
 
@@ -357,35 +420,91 @@ void setupKeypad() {
 }
 
 // =============================
-// Sensor Handling
+// Sensor Handling (analog-based Schmitt trigger)
 // =============================
 
 void readSensors() {
-  // Analog
-  g_sensor1Analog = analogRead(S1_A0_PIN);
-  g_sensor2Analog = analogRead(S2_A0_PIN);
+  uint32_t now = millis();
 
-  // Digital
-  g_sensor1Digital = digitalRead(S1_D0_PIN);
-  g_sensor2Digital = digitalRead(S2_D0_PIN);
+  // Sample analog IR only every IR_SAMPLE_INTERVAL_MS
+  if (now - g_lastIrSampleMs >= IR_SAMPLE_INTERVAL_MS) {
+    g_lastIrSampleMs = now;
 
-  // Debug print  // using serial plotter vscode plugin by Mario Zechner
-  Serial.print(">");
+    // Analog reads
+    g_sensor1Analog = analogRead(S1_A0_PIN);
+    g_sensor2Analog = analogRead(S2_A0_PIN);
 
-  Serial.print("S1: ");
-  Serial.print(g_sensor1Analog);
-  Serial.print(",");
+    // Optional digital reads (for debug only, NOT used for counting)
+    g_sensor1Digital = digitalRead(S1_D0_PIN);
+    g_sensor2Digital = digitalRead(S2_D0_PIN);
 
-  Serial.print("D1: ");
-  Serial.print(g_sensor1Digital);
-  Serial.print(",");
+    // ----- Schmitt trigger & event detection for Sensor 1 -----
+    bool s1Event = false;
+    if (g_s1HighRegion) {
+      // High region → look for dip below low threshold (Lth)
+      if (g_sensor1Analog <= IR_LTH) {
+        s1Event = true;           // local event on S1
+        g_s1HighRegion = false;   // move to low region
+      }
+    } else {
+      // Low region → wait to go back above high threshold (Hth) to re-arm
+      if (g_sensor1Analog >= IR_HTH) {
+        g_s1HighRegion = true;
+      }
+    }
 
-  Serial.print("S2: ");
-  Serial.print(g_sensor2Analog);
-  Serial.print(",");
+    // ----- Schmitt trigger & event detection for Sensor 2 -----
+    bool s2Event = false;
+    if (g_s2HighRegion) {
+      if (g_sensor2Analog <= IR_LTH) {
+        s2Event = true;           // local event on S2
+        g_s2HighRegion = false;   // move to low region
+      }
+    } else {
+      if (g_sensor2Analog >= IR_HTH) {
+        g_s2HighRegion = true;
+      }
+    }
 
-  Serial.print("D2: ");
-  Serial.println(g_sensor2Digital);
+    // OR logic between sensors with merge window
+    bool tokenEvent = s1Event || s2Event;
+    if (tokenEvent) {
+      // If this event is sufficiently separated from the last one,
+      // treat it as a new token. Otherwise, same token across two sensors.
+      if (now - g_lastTokenEventMs >= TOKEN_MERGE_WINDOW_MS) {
+        g_lastTokenEventMs = now;
+
+        if (g_addBundle10) {
+          g_tokenCount += 10;
+          g_addBundle10 = false;  // one-shot bundle
+          Serial.println("Token event: +10 (bundle)");
+        } else {
+          g_tokenCount += 1;
+          Serial.println("Token event: +1");
+        }
+
+        if (g_tokenCount > 9999) {
+          g_tokenCount = 9999;
+        }
+      } else {
+        // Within merge window: treat as same physical token → ignore for count
+        Serial.println("Token event merged (same token across sensors)");
+      }
+    }
+
+    // Serial debug output (for plotting / diagnostics)
+    Serial.print(">");
+    Serial.print("S1A:");
+    Serial.print(g_sensor1Analog);
+    Serial.print(",D1:");
+    Serial.print(g_sensor1Digital);
+    Serial.print(",S2A:");
+    Serial.print(g_sensor2Analog);
+    Serial.print(",D2:");
+    Serial.print(g_sensor2Digital);
+    Serial.print(",CNT:");
+    Serial.println(g_tokenCount);
+  }
 }
 
 // =============================
@@ -424,35 +543,33 @@ void handleKeypad() {
 }
 
 // =============================
-// Button Press Handlers (WiFi demo only)
+// Button Press Handlers
 // =============================
 
-// Key 1 → no-network symbol (circle with slash)
+// Key 1 → Reset token counter
 void onKey1Pressed() {
-  g_lastKeyPressed = "Key 1";
-  g_wifiLevelIndex = 0;
-  Serial.println("Key 1 pressed -> WiFi NO NETWORK (circle with slash)");
+  g_tokenCount = 0;
+  g_lastKeyPressed = "Key 1 Reset";
+  Serial.println("Key 1 pressed -> Counter RESET");
 }
 
-// Key 2 → 1 bar
+// Key 2 → Enable +10 bundle for next token event
 void onKey2Pressed() {
-  g_lastKeyPressed = "Key 2";
-  g_wifiLevelIndex = 1;
-  Serial.println("Key 2 pressed -> WiFi 1 bar");
+  g_addBundle10 = true;
+  g_lastKeyPressed = "Key 2 Bundle +10";
+  Serial.println("Key 2 pressed -> Next token = +10 bundle");
 }
 
-// Key 3 → 3 bars
+// Key 3 → Reserved
 void onKey3Pressed() {
-  g_lastKeyPressed = "Key 3";
-  g_wifiLevelIndex = 3;
-  Serial.println("Key 3 pressed -> WiFi 3 bars");
+  g_lastKeyPressed = "Key 3 (reserved)";
+  Serial.println("Key 3 pressed (reserved)");
 }
 
-// Key 4 → 4 bars (full)
+// Key 4 → Reserved
 void onKey4Pressed() {
-  g_lastKeyPressed = "Key 4";
-  g_wifiLevelIndex = 4;
-  Serial.println("Key 4 pressed -> WiFi 4 bars (full)");
+  g_lastKeyPressed = "Key 4 (reserved)";
+  Serial.println("Key 4 pressed (reserved)");
 }
 
 // =============================
@@ -552,11 +669,12 @@ void drawWifi(uint8_t levelIndex) {
     u8g2.drawBox(xLeft, yTop, barW, barH);
   }
 }
+
 void drawScreen() {
   const int16_t x0 = 0;
   int16_t y = 14;
 
-  // Header: big font
+  // Header: big font "D" on the left
   u8g2.setFont(u8g2_font_10x20_tf);
   u8g2.setCursor(x0, y);
   u8g2.print("D");
@@ -585,31 +703,27 @@ void drawScreen() {
   u8g2.setCursor(timeX, y - 3);
   u8g2.print(g_timeString);
 
-  // ----- Move down for data lines -----
-  y += 16;
+  // ===========================
+  // Main area: big token counter 0..9999
+  // ===========================
+  u8g2.setFont(u8g2_font_logisoso32_tf);
 
-  // Data: smaller bold font
-  u8g2.setFont(u8g2_font_8x13B_tf);
+  if (g_tokenCount < 0) g_tokenCount = 0;
+  if (g_tokenCount > 9999) g_tokenCount = 9999;
 
-  u8g2.setCursor(x0, y);
-  u8g2.print("S1 A:");
-  u8g2.print(g_sensor1Analog);
-  u8g2.print(" D:");
-  u8g2.print(g_sensor1Digital ? "H" : "L");
-  y += 13;
+  char buf[6];
+  snprintf(buf, sizeof(buf), "%d", g_tokenCount);
 
-  u8g2.setCursor(x0, y);
-  u8g2.print("S2 A:");
-  u8g2.print(g_sensor2Analog);
-  u8g2.print(" D:");
-  u8g2.print(g_sensor2Digital ? "H" : "L");
-  y += 13;
+  int16_t countWidth = u8g2.getStrWidth(buf);
+  int16_t countX = (128 - countWidth) / 2;
+  if (countX < 0) countX = 0;
 
-  u8g2.setCursor(x0, y);
-  u8g2.print("Last key: ");
-  u8g2.print(g_lastKeyPressed);
+  // Vertical positioning: centered-ish below status bar
+  int16_t countY = 64 - 6; // baseline near bottom, leaving a small margin
+
+  u8g2.setCursor(countX, countY);
+  u8g2.print(buf);
 }
-
 
 // =============================
 // ISR Implementations
