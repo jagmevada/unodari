@@ -233,6 +233,13 @@
 #include <Wire.h>
 #include <U8g2lib.h>
 
+#include <WiFiManager.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
+#include <time.h>
+
 // =============================
 // Pin Definitions
 // =============================
@@ -267,6 +274,32 @@
 
 // Time window for OR-ing between two sensors (ms)
 #define TOKEN_MERGE_WINDOW_MS  90UL    // if events are closer than this, count as one token
+
+// Meal window macros (IST)
+#define BFL 7
+#define BFH 9
+#define LFL 11
+#define LFH 14
+#define DFL 18
+#define DFH 21
+#define DUMMYHREFORTESTING 0 // Set to 0 for production, >0 for testing
+
+// Time sync config
+#ifndef TIME_SYNC_INTERVAL_MS
+#define TIME_SYNC_INTERVAL_MS 3600000UL // 1 hour
+#endif
+#ifndef TIME_RETRY_INTERVAL_MS
+#define TIME_RETRY_INTERVAL_MS 600000UL // 10 minutes
+#endif
+#ifndef TIME_INITIAL_TIMEOUT_MS
+#define TIME_INITIAL_TIMEOUT_MS 5000UL
+#endif
+#ifndef TIME_SYNC_ATTEMPT_TIMEOUT_MS
+#define TIME_SYNC_ATTEMPT_TIMEOUT_MS 10000UL
+#endif
+
+// India Standard Time offset from UTC in seconds (+5:30)
+static const long IST_OFFSET_SECONDS = 5 * 3600 + 30 * 60;
 
 // =============================
 // Global State
@@ -319,6 +352,190 @@ uint8_t g_wifiLevelIndex = 4;     // TODO: backend should update based on WiFi s
 // Time string in "hh:mm AM/PM" format (to be updated by backend NTP/RTC code)
 String g_timeString = "12:00 AM"; // TODO: backend should set real time here
 
+// Supabase backend config
+const char *deviceId = "uno_1"; // Change to uno_2 or uno_3 for other devices
+const char *deviceId2 = "uno_2";
+const char *deviceId3 = "uno_3";
+const char *postURL = "https://akxcjabakrvfaevdfwru.supabase.co/rest/v1/unodari_token";
+const char *apikey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFreGNqYWJha3J2ZmFldmRmd3J1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDkxMjMwMjUsImV4cCI6MjA2NDY5OTAyNX0.kykki4uVVgkSVU4lH-wcuGRdyu2xJ1CQkYFhQq_u08w";
+
+enum mealType {
+  NONE,
+  BREAKFAST,
+  LUNCH,
+  DINNER,
+  MEAL_COUNT
+};
+String meal[MEAL_COUNT] = {"none", "breakfast", "lunch", "dinner"};
+mealType currentMeal = NONE;
+
+struct TokenData {
+  int token_count;
+  mealType meal;
+  char date[11];    // "yyyy-mm-dd"
+  bool update;
+};
+
+TokenData token_data = {0, NONE, "1970-01-01", false};
+TokenData token_data2 = {0, NONE, "1970-01-01", false};
+TokenData token_data3 = {0, NONE, "1970-01-01", false};
+Preferences prefs;
+
+
+// fetchNetworkTime must be defined before TimeManager uses it
+time_t fetchNetworkTime(unsigned long timeoutMs = 5000) {
+  time_t now = time(nullptr);
+  const time_t validThreshold = 1000000000;
+  unsigned long start = millis();
+  while (now < validThreshold && (millis() - start) < timeoutMs) {
+    delay(50);
+    now = time(nullptr);
+  }
+  if (now < validThreshold) return (time_t)-1;
+  return now;
+}
+
+// TimeManager for NTP sync
+class TimeManager {
+public:
+  TimeManager()
+      : lastSyncedEpoch(0), lastSyncMillis(0), lastAttemptMillis(0),
+        syncIntervalMs(TIME_SYNC_INTERVAL_MS), retryIntervalMs(TIME_RETRY_INTERVAL_MS),
+        lastSyncSuccess(false), lastNoUpdateLogMillis(0) {}
+
+  void begin(unsigned long intervalMs = TIME_SYNC_INTERVAL_MS, unsigned long initialTimeoutMs = TIME_INITIAL_TIMEOUT_MS) {
+    syncIntervalMs = intervalMs;
+    lastAttemptMillis = millis();
+    if (!trySync(initialTimeoutMs)) {
+      lastSyncedEpoch = time(nullptr);
+      lastSyncSuccess = false;
+      lastAttemptMillis = millis();
+      Serial.println("⚠️ TimeManager: Initial NTP sync failed — continuing with local clock");
+    }
+  }
+
+  bool trySync(unsigned long timeoutMs = TIME_SYNC_ATTEMPT_TIMEOUT_MS) {
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("⚠️ TimeManager: NTP sync skipped — WiFi not connected");
+      lastSyncSuccess = false;
+      lastAttemptMillis = millis();
+      return false;
+    }
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+    unsigned long attemptStart = millis();
+    time_t epoch = fetchNetworkTime(timeoutMs);
+    unsigned long took = millis() - attemptStart;
+    if (epoch == (time_t)-1) {
+      Serial.printf("⚠️ TimeManager: NTP attempt timed out after %lums (time() still %ld)\n", took, (long)time(nullptr));
+      lastSyncSuccess = false;
+      lastAttemptMillis = millis();
+      return false;
+    }
+    Serial.printf("⏱ TimeManager: NTP returned epoch %ld after %lums\n", (long)epoch, took);
+    if (epoch >= validThreshold) {
+      time_t expected = lastSyncedEpoch + (time_t)((attemptStart - lastSyncMillis) / 1000);
+      long diff = (long)epoch - (long)expected;
+      if (lastSyncMillis == 0 || llabs(diff) > 2) {
+        lastSyncedEpoch = epoch;
+        lastSyncMillis = millis();
+        lastSyncSuccess = true;
+        struct tm tinfo;
+        gmtime_r(&epoch, &tinfo);
+        char buf[32];
+        strftime(buf, sizeof(buf), "%FT%TZ", &tinfo);
+        Serial.printf("⏱ TimeManager: NTP sync succeeded: %s\n", buf);
+        return true;
+      } else {
+        lastSyncSuccess = true;
+        lastSyncMillis = millis();
+        if ((millis() - lastNoUpdateLogMillis) >= retryIntervalMs) {
+          Serial.println("ℹ️ TimeManager: Time check OK — no new NTP update (using local clock)");
+          lastNoUpdateLogMillis = millis();
+        }
+        return false;
+      }
+    }
+    Serial.printf("⚠️ TimeManager: NTP returned invalid epoch: %ld\n", (long)epoch);
+    lastSyncSuccess = false;
+    lastAttemptMillis = millis();
+    return false;
+  }
+
+  void update() {
+    unsigned long nowMs = millis();
+    unsigned long effectiveInterval = lastSyncSuccess ? syncIntervalMs : retryIntervalMs;
+    if (lastSyncSuccess) {
+      if ((nowMs - lastSyncMillis) >= effectiveInterval) {
+        trySync(TIME_SYNC_ATTEMPT_TIMEOUT_MS);
+      }
+    } else {
+      if ((nowMs - lastAttemptMillis) >= effectiveInterval) {
+        trySync(TIME_SYNC_ATTEMPT_TIMEOUT_MS);
+      }
+    }
+  }
+
+  time_t now() const {
+    unsigned long elapsedMs = millis() - lastSyncMillis;
+    return lastSyncedEpoch + (time_t)(elapsedMs / 1000);
+  }
+
+  void getUTCTime(struct tm &out) const {
+    time_t t = now();
+    gmtime_r(&t, &out);
+  }
+
+private:
+  time_t lastSyncedEpoch;
+  unsigned long lastSyncMillis;
+  unsigned long syncIntervalMs;
+  unsigned long retryIntervalMs;
+  bool lastSyncSuccess;
+  unsigned long lastAttemptMillis;
+  unsigned long lastNoUpdateLogMillis;
+  static const time_t validThreshold = 1000000000;
+};
+
+TimeManager timeManager;
+
+void sendTokenData(String id, TokenData * token_data) {
+  if (WiFi.status() != WL_CONNECTED) return;
+  HTTPClient http;
+  String url = String(postURL) + "?sensor_id=eq." + id + "&date=eq." + token_data->date;
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("apikey", apikey);
+  http.addHeader("Authorization", "Bearer " + String(apikey));
+  http.addHeader("Prefer", "return=representation");
+  StaticJsonDocument<256> doc;
+  doc[meal[token_data->meal]] = token_data->token_count;
+  String payload;
+  serializeJson(doc, payload);
+  int code = http.sendRequest("PATCH", payload);
+  http.end();
+}
+
+void checkWiFi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.disconnect();
+    WiFi.begin();
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+      delay(500);
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      return;
+    }
+    WiFiManager wm;
+    wm.setConfigPortalTimeout(120);
+    String setupName = String(deviceId) + "_SETUP";
+    if (!wm.autoConnect(setupName.c_str())) {
+      delay(1000);
+      ESP.restart();
+    }
+  }
+}
+
 // =============================
 // OLED Display (U8g2)
 // =============================
@@ -369,6 +586,80 @@ void setup() {
   setupSensors();
   setupKeypad();
 
+  // Persistent storage restore
+  prefs.begin("tokencfg", true); // read-only
+  token_data.token_count = prefs.getInt("token_count", 0);
+  token_data.meal = (mealType)prefs.getInt("meal", NONE);
+  String dateStr = prefs.getString("date", "1970-01-01");
+  strncpy(token_data.date, dateStr.c_str(), sizeof(token_data.date));
+  token_data.date[10] = '\0';
+  prefs.end();
+  bool valid = true;
+  if (token_data.meal < NONE || token_data.meal >= MEAL_COUNT) valid = false;
+  if (strlen(token_data.date) != 10) valid = false;
+  if (!valid) {
+    token_data.token_count = 0;
+    token_data.meal = NONE;
+    strcpy(token_data.date, "1970-01-01");
+    token_data.update = false;
+    prefs.begin("tokencfg", false);
+    prefs.putInt("token_count", token_data.token_count);
+    prefs.putInt("meal", token_data.meal);
+    prefs.putString("date", token_data.date);
+    prefs.end();
+  }
+
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(120);
+  wm.setWiFiAutoReconnect(true);
+  String setupName = String(deviceId) + "_SETUP";
+  if (!wm.autoConnect(setupName.c_str())) {
+    delay(1000);
+    ESP.restart();
+  }
+
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  while (true) {
+    timeManager.begin(TIME_SYNC_INTERVAL_MS, TIME_INITIAL_TIMEOUT_MS);
+    time_t nowEpoch = timeManager.now();
+    if (nowEpoch >= 1000000000) {
+      struct tm tinfo;
+      timeManager.getUTCTime(tinfo);
+      char buf[32];
+      strftime(buf, sizeof(buf), "%FT%TZ", &tinfo);
+      // Convert NTP to IST date string
+      time_t epochLocal = nowEpoch + IST_OFFSET_SECONDS;
+      struct tm tIST;
+      gmtime_r(&epochLocal, &tIST);
+      char todayIST[11];
+      strftime(todayIST, sizeof(todayIST), "%Y-%m-%d", &tIST);
+      int hour = tIST.tm_hour + DUMMYHREFORTESTING;
+      mealType currentMealType = NONE;
+      if (hour >= BFL && hour < BFH) currentMealType = BREAKFAST;
+      else if (hour >= LFL && hour < LFH) currentMealType = LUNCH;
+      else if (hour >= DFL && hour < DFH) currentMealType = DINNER;
+      if (currentMealType == NONE) {
+        // Not a meal time, don't initialize token_data
+      } else if (strcmp(token_data.date, todayIST) == 0 && token_data.meal == currentMealType) {
+        // Keep token_count
+      } else {
+        token_data.token_count = 0;
+        strncpy(token_data.date, todayIST, sizeof(token_data.date));
+        token_data.date[10] = '\0';
+        token_data.meal = currentMealType;
+        token_data.update = true;
+        prefs.begin("tokencfg", false);
+        prefs.putInt("token_count", token_data.token_count);
+        prefs.putInt("meal", token_data.meal);
+        prefs.putString("date", token_data.date);
+        prefs.end();
+      }
+      break;
+    } else {
+      delay(2000);
+    }
+  }
+
   Serial.println("System initialized.");
 }
 
@@ -377,10 +668,76 @@ void setup() {
 // =============================
 
 void loop() {
-  readSensors();   // analog-based token detection + Serial debug
+  static unsigned long lastWiFiCheck = 0;
+  static unsigned long lastEEPROMWrite = 0;
+  static unsigned long lastSensorSend = 0;
+  unsigned long now = millis();
+
+  // WiFi check every 10s
+  if (now - lastWiFiCheck > 10000) {
+    lastWiFiCheck = now;
+    checkWiFi();
+  }
+  timeManager.update();
+
+  // Get IST time for meal logic and display
+  time_t epoch = timeManager.now();
+  time_t epochLocal = epoch + IST_OFFSET_SECONDS;
+  struct tm t;
+  gmtime_r(&epochLocal, &t);
+  char dateStr[11];
+  strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &t);
+  int hour = t.tm_hour + DUMMYHREFORTESTING;
+  strncpy(token_data.date, dateStr, sizeof(token_data.date));
+  token_data.date[10] = '\0';
+
+  // Format time string for display
+  char timeBuf[10];
+  int displayHour = t.tm_hour;
+  bool isPM = false;
+  if (displayHour >= 12) { isPM = true; if (displayHour > 12) displayHour -= 12; }
+  if (displayHour == 0) displayHour = 12;
+  snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d %s", displayHour, t.tm_min, isPM ? "PM" : "AM");
+  g_timeString = String(timeBuf);
+
+  // Determine meal window
+  if (hour >= BFL && hour < BFH) token_data.meal = BREAKFAST;
+  else if (hour >= LFL && hour < LFH) token_data.meal = LUNCH;
+  else if (hour >= DFL && hour < DFH) token_data.meal = DINNER;
+  else token_data.meal = NONE;
+
+  // IR sensor logic and token counting
+  readSensors(); // This will increment g_tokenCount on valid IR event
+  // Sync g_tokenCount to token_data if in meal window
+  if (token_data.meal != NONE) {
+    token_data.token_count = g_tokenCount;
+    token_data2 = token_data;
+    token_data3 = token_data;
+    token_data2.token_count += 2;
+    token_data3.token_count += 3;
+    // Send to backend every 10s
+    if (now - lastSensorSend >= 10000) {
+      sendTokenData(deviceId, &token_data);
+      // sendTokenData(deviceId2, &token_data2);
+      // sendTokenData(deviceId3, &token_data3);
+      lastSensorSend = now;
+    }
+  }
+
+  // EEPROM save every 20s or if update flag set
+  if ((now - lastEEPROMWrite >= 20000) || token_data.update == true) {
+    lastEEPROMWrite = now;
+    token_data.update = false;
+    prefs.begin("tokencfg", false);
+    prefs.putInt("token_count", token_data.token_count);
+    prefs.putInt("meal", token_data.meal);
+    prefs.putString("date", token_data.date);
+    prefs.end();
+  }
+
+  // readSensors();   // analog-based token detection + Serial debug
   handleKeypad();  // keypad + bundle/reset logic
   updateDisplay(); // draw status bar + big counter
-
   delay(LOOP_DELAY_MS);
 }
 
@@ -674,53 +1031,40 @@ void drawScreen() {
   const int16_t x0 = 0;
   int16_t y = 14;
 
-  // Header: big font "D" on the left
+  // Dynamic header: D/M/T based on deviceId
+  char titleChar = 'D';
+  if (strcmp(deviceId, "uno_2") == 0) titleChar = 'M';
+  else if (strcmp(deviceId, "uno_3") == 0) titleChar = 'T';
   u8g2.setFont(u8g2_font_10x20_tf);
   u8g2.setCursor(x0, y);
-  u8g2.print("D");
+  u8g2.print(titleChar);
 
-  // ---- Draw Battery & WiFi first (defines right boundary for time) ----
   drawBattery(g_batteryLevelIndex);
   drawWifi(g_wifiLevelIndex);
 
-  // ---- Time on SAME LINE as WiFi/Battery ----
   u8g2.setFont(u8g2_font_7x13B_tf);
-
-  // WiFi icon bounding box values
   const uint8_t battW = 18;
   const uint8_t tipW  = 2;
   const uint8_t wifiW = 12;
-
   int16_t battX = 128 - battW - tipW - 1;
-  int16_t wifiX = battX - wifiW - 3;   // 3px gap before battery
-
-  // Time ends just before WiFi icon, with 3px safety gap
+  int16_t wifiX = battX - wifiW - 3;
   int16_t timeWidth = u8g2.getStrWidth(g_timeString.c_str());
   int16_t timeX = wifiX - timeWidth - 3;
   if (timeX < 0) timeX = 0;
-
-  // -3 aligns 7x13 font vertically with icon top row
   u8g2.setCursor(timeX, y - 3);
   u8g2.print(g_timeString);
 
-  // ===========================
   // Main area: big token counter 0..9999
-  // ===========================
   u8g2.setFont(u8g2_font_logisoso32_tf);
-
-  if (g_tokenCount < 0) g_tokenCount = 0;
-  if (g_tokenCount > 9999) g_tokenCount = 9999;
-
+  int displayCount = g_tokenCount;
+  if (displayCount < 0) displayCount = 0;
+  if (displayCount > 9999) displayCount = 9999;
   char buf[6];
-  snprintf(buf, sizeof(buf), "%d", g_tokenCount);
-
+  snprintf(buf, sizeof(buf), "%d", displayCount);
   int16_t countWidth = u8g2.getStrWidth(buf);
   int16_t countX = (128 - countWidth) / 2;
   if (countX < 0) countX = 0;
-
-  // Vertical positioning: centered-ish below status bar
-  int16_t countY = 64 - 6; // baseline near bottom, leaving a small margin
-
+  int16_t countY = 64 - 6;
   u8g2.setCursor(countX, countY);
   u8g2.print(buf);
 }
