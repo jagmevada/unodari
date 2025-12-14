@@ -326,7 +326,7 @@ RTC_DS3231 rtc;
 #define LFL 11
 #define LFH 14
 #define DFL 18
-#define DFH 21
+#define DFH 23
 #define DUMMYHREFORTESTING 0 // Set to 0 for production, >0 for testing
 
 // Time sync config
@@ -703,79 +703,89 @@ void processKey(uint8_t pin,
 // =============================
 
 void setup() {
-   setupSerial();
-  setupDisplay();
-  setupSensors();
-  setupKeypad();
-      // --- RTC I2C bus init ---
-      rtcWire.begin(RTC_SDA_PIN, RTC_SCL_PIN, 100000); // 100kHz
-      rtc.begin(&rtcWire);
+  // 1. Initialize serial port for debug output
+  setupSerial();
 
-      // --- Time source selection logic ---
+  // 2. Initialize OLED display
+  setupDisplay();
+
+  // 3. Initialize IR sensors (pin modes, ADC)
+  setupSensors();
+
+  // 4. Initialize keypad (pin modes, interrupts)
+  setupKeypad();
+
+  // 5. Initialize RTC I2C bus and DS3231 RTC
+  rtcWire.begin(RTC_SDA_PIN, RTC_SCL_PIN, 100000); // 100kHz
+  rtc.begin(&rtcWire);
+
+  // 6. Time source selection logic: Try NTP, else RTC, else pause system
+  g_timeSource = TIME_NONE;
+  g_timeValid = false;
+  strcpy(g_timeErrorMsg, "");
+
+  // 7. Print RTC time at boot for debugging
+  DateTime rtcNowDebug = rtc.now();
+  Serial.print("[DEBUG] RTC time at boot: ");
+  Serial.print(rtcNowDebug.year()); Serial.print("-");
+  Serial.print(rtcNowDebug.month()); Serial.print("-");
+  Serial.print(rtcNowDebug.day()); Serial.print(" ");
+  Serial.print(rtcNowDebug.hour()); Serial.print(":");
+  Serial.print(rtcNowDebug.minute()); Serial.print(":");
+  Serial.println(rtcNowDebug.second());
+
+  // 8. Try to get NTP time (5s timeout)
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");  //auto sync time from NTP in background
+  time_t ntpEpoch = time(nullptr);
+  const time_t validThreshold = 1000000000;
+  unsigned long startNtp = millis();
+  while (ntpEpoch < validThreshold && (millis() - startNtp) < 5000) { // 5s max wait
+    delay(100);
+    ntpEpoch = time(nullptr);
+  }
+  Serial.print("[DEBUG] NTP time at boot: ");
+  if (ntpEpoch >= validThreshold) {
+    struct tm ntpTm;
+    gmtime_r(&ntpEpoch, &ntpTm);
+    char ntpBuf[32];
+    strftime(ntpBuf, sizeof(ntpBuf), "%Y-%m-%d %H:%M:%S UTC", &ntpTm);
+    Serial.println(ntpBuf);
+  } else {
+    Serial.println("NTP not available");
+  }
+
+  // 9. Set time source and program RTC if needed
+  if (ntpEpoch >= validThreshold) {
+    g_timeSource = TIME_NTP;
+    g_timeValid = true;
+    Serial.println("[TIME] NTP time acquired at boot.");
+    logCurrentISTTime();
+    // Set RTC from NTP if RTC is invalid or drift > 2min (done later)
+  } else {
+    // 2. Try RTC
+    DateTime rtcNow = rtc.now();
+    if (isRTCValid(rtcNow)) {
+      setSystemTimeFromRTC(rtcNow);
+      g_timeSource = TIME_RTC;
+      g_timeValid = true;
+      Serial.println("[TIME] RTC used for system time at boot.");
+      logCurrentISTTime();
+    } else {
+      // 3. Neither NTP nor RTC valid
       g_timeSource = TIME_NONE;
       g_timeValid = false;
-      strcpy(g_timeErrorMsg, "");
+      strcpy(g_timeErrorMsg, "No valid NTP or RTC time! System paused.");
+      Serial.println("[TIME] ERROR: No valid NTP or RTC time! System paused.");
+    }
+  }
 
-      // 1. Print RTC and NTP time at boot for debugging
-      DateTime rtcNowDebug = rtc.now();
-      Serial.print("[DEBUG] RTC time at boot: ");
-      Serial.print(rtcNowDebug.year()); Serial.print("-");
-      Serial.print(rtcNowDebug.month()); Serial.print("-");
-      Serial.print(rtcNowDebug.day()); Serial.print(" ");
-      Serial.print(rtcNowDebug.hour()); Serial.print(":");
-      Serial.print(rtcNowDebug.minute()); Serial.print(":");
-      Serial.println(rtcNowDebug.second());
+  // 10. (Optional) One-time RTC initialization from NTP if FIRSTTIME is defined
+#ifdef FIRSTTIME
+  Serial.println("[RTC] FIRSTTIME: Setting DS3231 from NTP (UTC)...");
+  setRTCFromNTP();
+#endif
 
-      configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-      time_t ntpEpoch = time(nullptr);
-      const time_t validThreshold = 1000000000;
-      unsigned long startNtp = millis();
-      while (ntpEpoch < validThreshold && (millis() - startNtp) < 5000) { // 5s max wait
-        delay(100);
-        ntpEpoch = time(nullptr);
-      }
-      Serial.print("[DEBUG] NTP time at boot: ");
-      if (ntpEpoch >= validThreshold) {
-        struct tm ntpTm;
-        gmtime_r(&ntpEpoch, &ntpTm);
-        char ntpBuf[32];
-        strftime(ntpBuf, sizeof(ntpBuf), "%Y-%m-%d %H:%M:%S UTC", &ntpTm);
-        Serial.println(ntpBuf);
-      } else {
-        Serial.println("NTP not available");
-      }
-
-      if (ntpEpoch >= validThreshold) {
-        g_timeSource = TIME_NTP;
-        g_timeValid = true;
-        Serial.println("[TIME] NTP time acquired at boot.");
-        logCurrentISTTime();
-        // Set RTC from NTP if RTC is invalid or drift > 2min (done later)
-      } else {
-        // 2. Try RTC
-        DateTime rtcNow = rtc.now();
-        if (isRTCValid(rtcNow)) {
-          setSystemTimeFromRTC(rtcNow);
-          g_timeSource = TIME_RTC;
-          g_timeValid = true;
-          Serial.println("[TIME] RTC used for system time at boot.");
-          logCurrentISTTime();
-        } else {
-          // 3. Neither NTP nor RTC valid
-          g_timeSource = TIME_NONE;
-          g_timeValid = false;
-          strcpy(g_timeErrorMsg, "No valid NTP or RTC time! System paused.");
-          Serial.println("[TIME] ERROR: No valid NTP or RTC time! System paused.");
-        }
-      }
-    // --- One-time RTC initialization from NTP ---
-  #ifdef FIRSTTIME
-    Serial.println("[RTC] FIRSTTIME: Setting DS3231 from NTP (UTC)...");
-    setRTCFromNTP();
-  #endif
-
-
-  // Persistent storage restore
+  // 11. Restore persistent storage (token count, meal, date)
   prefs.begin("tokencfg", true); // read-only
   token_data.token_count = prefs.getInt("token_count", 0);
   token_data.meal = (mealType)prefs.getInt("meal", NONE);
@@ -798,6 +808,7 @@ void setup() {
     prefs.end();
   }
 
+  // 12. WiFiManager: connect or launch captive portal if needed
   WiFiManager wm;
   wm.setConfigPortalTimeout(120);
   wm.setWiFiAutoReconnect(true);
@@ -807,6 +818,7 @@ void setup() {
     ESP.restart();
   }
 
+  // 13. Wait for NTP sync and initialize meal/date state
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   while (true) {
     timeManager.begin(TIME_SYNC_INTERVAL_MS, TIME_INITIAL_TIMEOUT_MS);
@@ -849,9 +861,7 @@ void setup() {
     }
   }
 
-  // ... after WiFiManager / NTP init is finished ...
-
-  // Create a queue for up to 3 send jobs
+  // 14. Create a queue for up to 3 send jobs (for HTTP background task)
   g_sendQueue = xQueueCreate(3, sizeof(SendJob));
   if (g_sendQueue == nullptr) {
     Serial.println("ERROR: Failed to create send queue!");
@@ -868,7 +878,7 @@ void setup() {
     );
   }
 
-
+  // 15. Final system ready message
   Serial.println("System initialized.");
 }
 
