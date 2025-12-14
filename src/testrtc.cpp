@@ -14,6 +14,13 @@
 TwoWire rtcWire = TwoWire(1);
 RTC_DS3231 rtc;
 
+// =============================
+// Debug switches
+// =============================
+// 0 = DO NOT set RTC from NTP (test coin-cell retention across power cycles)
+// 1 = Set RTC from NTP (use once when needed)
+#define SET_RTC_FROM_NTP 0
+
 // IST offset (+5:30)
 static const long IST_OFFSET_SECONDS = 5 * 3600 + 30 * 60;
 
@@ -49,14 +56,12 @@ static void printEpochAsIST(time_t epochUTC) {
 }
 
 static void printRtcNow(const DateTime &dt) {
-  char buf[32];
-  // RTClib DateTime is already UTC if we set it with UTC epoch
+  char buf[40];
   snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d (RTC UTC)",
            dt.year(), dt.month(), dt.day(),
            dt.hour(), dt.minute(), dt.second());
   Serial.println(buf);
 
-  // Convert RTC UTC -> IST for display
   time_t rtcEpochUTC = (time_t)dt.unixtime();
   Serial.print("RTC IST: ");
   printEpochAsIST(rtcEpochUTC);
@@ -66,7 +71,7 @@ void setup() {
   Serial.begin(460800);
   delay(300);
   Serial.println();
-  Serial.println("=== ESP32 DS3231 RTC Debug (NTP -> RTC -> Readback) ===");
+  Serial.println("=== ESP32 DS3231 RTC Debug (READ-ONLY RTC test) ===");
 
   // ---- Start RTC I2C bus on GPIO25/26 ----
   rtcWire.begin(RTC_SDA_PIN, RTC_SCL_PIN, 100000);
@@ -76,6 +81,17 @@ void setup() {
     while (1) delay(1000);
   }
   Serial.println("✅ DS3231 detected.");
+
+  // Print RTC immediately (this is what you care about after power cycle)
+  Serial.println("📌 RTC time at boot:");
+  printRtcNow(rtc.now());
+
+  // Optional: show if RTC reports lostPower()
+  if (rtc.lostPower()) {
+    Serial.println("⚠️ rtc.lostPower() = true (battery missing/dead or time was lost previously).");
+  } else {
+    Serial.println("ℹ️ rtc.lostPower() = false");
+  }
 
   // ---- Connect WiFi (WiFiManager) ----
   WiFiManager wm;
@@ -90,15 +106,14 @@ void setup() {
   Serial.print("✅ WiFi connected. IP: ");
   Serial.println(WiFi.localIP());
 
-  // ---- Start NTP ----
-  Serial.println("⏱ Starting NTP...");
+  // ---- Start NTP (for comparison only) ----
+  Serial.println("⏱ Starting NTP (comparison only)...");
   configTime(0, 0, "pool.ntp.org", "time.nist.gov"); // keep UTC in system
 
   time_t ntpEpochUTC = waitForNtpEpoch(15000); // 15 seconds max
   if (ntpEpochUTC == (time_t)-1) {
     Serial.println("❌ NTP time not available within timeout.");
-    Serial.println("Reading RTC only:");
-    printRtcNow(rtc.now());
+    Serial.println("Continuing with RTC-only prints.");
     return;
   }
 
@@ -107,21 +122,18 @@ void setup() {
   Serial.print("✅ NTP IST: ");
   printEpochAsIST(ntpEpochUTC);
 
+#if SET_RTC_FROM_NTP
   // ---- Set RTC from NTP UTC ----
   Serial.println("🔁 Setting DS3231 from NTP (UTC)...");
   rtc.adjust(DateTime((uint32_t)ntpEpochUTC));
 
   // ---- Read back immediately ----
-  DateTime rtcNow = rtc.now();
-  Serial.println("✅ Readback after setting:");
-  printRtcNow(rtcNow);
-
-  // Optional: show if RTC reports lostPower()
-  if (rtc.lostPower()) {
-    Serial.println("⚠️ rtc.lostPower() = true (battery missing/dead or time was lost previously).");
-  } else {
-    Serial.println("ℹ️ rtc.lostPower() = false");
-  }
+  Serial.println("✅ RTC readback after setting:");
+  printRtcNow(rtc.now());
+#else
+  Serial.println("🚫 RTC write is DISABLED (SET_RTC_FROM_NTP=0).");
+  Serial.println("✅ Power-cycle test: RTC should keep running on coin cell.");
+#endif
 }
 
 void loop() {
@@ -130,7 +142,6 @@ void loop() {
   if (millis() - lastMs >= 1000) {
     lastMs = millis();
     Serial.println("------------------------------");
-    DateTime rtcNow = rtc.now();
-    printRtcNow(rtcNow);
+    printRtcNow(rtc.now());
   }
 }
