@@ -1296,57 +1296,59 @@ void wifiManagerTask(void *param) {
   WiFiManager wm;
   wm.setWiFiAutoReconnect(true);
   wm.setConfigPortalBlocking(false);
-  wm.setConfigPortalTimeout(0);
+  wm.setConfigPortalTimeout(0);     // keep portal running
   wm.setConnectTimeout(5);
   wm.setConnectRetries(2);
 
+  uint32_t disconnectSince = 0;
   uint32_t lastReconnectTry = 0;
 
   for (;;) {
-    if (WiFi.status() == WL_CONNECTED) {
-      g_wifiLevelIndex = 4; // optionally map RSSI later
+    const bool connected = (WiFi.status() == WL_CONNECTED);
+
+    if (connected) {
+      g_wifiLevelIndex = 4;
+      disconnectSince = 0;
 
       if (g_portalRunning) {
-        // #if defined(WIFIMANAGER_VERSION)  // not perfect
         wm.stopConfigPortal();
-        //  #endif  
-        WiFi.mode(WIFI_STA);        // drop AP mode explicitly
+        WiFi.mode(WIFI_STA);
         g_portalRunning = false;
         Serial.println("[WiFi] Connected -> portal stopped, STA-only");
       }
 
-      vTaskDelay(pdMS_TO_TICKS(500));
+      vTaskDelay(pdMS_TO_TICKS(250));
       continue;
     }
 
     // Not connected
     g_wifiLevelIndex = 0;
+    if (disconnectSince == 0) disconnectSince = millis();
 
-    // If portal is running, ensure AP+STA (critical)
-    if (g_portalRunning) {
-      WiFi.mode(WIFI_AP_STA);
+    // ALWAYS try reconnect every few seconds (even if portal is running)
+    if (millis() - lastReconnectTry > 3000) {
+      lastReconnectTry = millis();
+      Serial.println("[WiFi] Reconnect attempt...");
+      WiFi.mode(WIFI_AP_STA);   // safe: keeps STA alive while portal runs
+      WiFi.reconnect();         // or WiFi.begin();
     }
 
-    // Try STA reconnect every ~3s
-if (!g_portalRunning && millis() - lastReconnectTry > 3000) {
-  lastReconnectTry = millis();
-  Serial.println("[WiFi] Reconnect attempt...");
-  WiFi.reconnect();
-}
-
-    // Start portal once (non-blocking)
-    if (!g_portalRunning) {
-      Serial.println("[WiFi] Starting captive portal (non-blocking)...");
-      WiFi.mode(WIFI_AP_STA);                 // ensure STA can still connect
-      wm.startConfigPortal(setupName.c_str()); // returns quickly
+    // Start portal only after some time disconnected (tune this)
+    if (!g_portalRunning && (millis() - disconnectSince > 15000)) {
+      Serial.println("[WiFi] Disconnected -> starting portal...");
+      WiFi.mode(WIFI_AP_STA);
+      wm.startConfigPortal(setupName.c_str());
       g_portalRunning = true;
     }
 
-    wm.process();
+    // Portal must be processed continuously once started
+    if (g_portalRunning) {
+      wm.process();
+    }
+
     vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
-
 
 
 static bool tryAcquireTimeFromNTP() {
