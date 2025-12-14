@@ -1,5 +1,86 @@
+// =============================
+// RTC/NTP Drift Correction State
+// =============================
+#define RTC_NTP_DRIFT_CHECK_INTERVAL_MS 600000UL // 10 minutes
+#define RTC_NTP_DRIFT_THRESHOLD_SEC 120 // 2 minutes
+unsigned long lastRTCDriftCheck = 0;
+
+// =============================
+// Time Source State
+// =============================
+enum TimeSource {
+  TIME_NONE,
+  TIME_NTP,
+  TIME_RTC
+};
+TimeSource g_timeSource = TIME_NONE;
+bool g_timeValid = false;
+char g_timeErrorMsg[48] = "";
+
+// Helper: Check if RTC time is valid (not 1970 or too old)
+bool isRTCValid(const DateTime& dt) {
+  return dt.year() > 2024;
+}
+
+// Helper: Set system time from RTC (UTC)
+void setSystemTimeFromRTC(const DateTime& dt) {
+  struct timeval tv;
+  tv.tv_sec = dt.unixtime();
+  tv.tv_usec = 0;
+  settimeofday(&tv, nullptr);
+}
+
+// Helper: Set RTC from system time (UTC)
+void setRTCFromSystemTime() {
+  time_t nowEpoch = time(nullptr);
+  rtc.adjust(DateTime(nowEpoch));
+}
+
+// Helper: Print current IST time string to Serial
+void logCurrentISTTime() {
+  time_t epoch = time(nullptr) + IST_OFFSET_SECONDS;
+  struct tm t;
+  gmtime_r(&epoch, &t);
+  char buf[32];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S IST", &t);
+  Serial.print("[TIME] Current IST: ");
+  Serial.println(buf);
+}
+#define FIRSTTIME // <-- Uncomment for first RTC setup, then comment out after RTC is set
+
+// One-time RTC initialization from NTP
+#ifdef FIRSTTIME
+void setRTCFromNTP() {
+  // Wait for NTP to be valid
+  time_t ntpEpoch = time(nullptr);
+  const time_t validThreshold = 1000000000;
+  unsigned long start = millis();
+  while (ntpEpoch < validThreshold && (millis() - start) < 15000) { // 15s max wait
+    delay(100);
+    ntpEpoch = time(nullptr);
+  }
+  if (ntpEpoch >= validThreshold) {
+    rtc.adjust(DateTime(ntpEpoch));
+    Serial.println("[RTC] DS3231 set from NTP (UTC) for first time.");
+  } else {
+    Serial.println("[RTC] ERROR: NTP not available, RTC not set.");
+  }
+}
+#endif
 /*
+
   Project overview for Copilot (ESP32 + TCRT + Keypad + OLED UI):
+
+  ==========================================
+  New Feature (Dec 2025): DS3231 RTC Fallback & Robust Time Handling
+  ==========================================
+  - Adds DS3231 RTC on a separate I2C bus (GPIO25=RTC_SDA, GPIO26=RTC_SCL, 100kHz) using RTClib.
+  - On boot, attempts NTP sync (non-blocking, with timeout). If NTP fails, uses RTC for timekeeping.
+  - If neither NTP nor RTC is valid, system pauses token counting and backend sync, and displays error.
+  - If NTP later becomes available, compares NTP and RTC; if drift >2min, updates RTC from NTP.
+  - RTC always stores UTC; IST offset is applied for display and meal logic.
+  - All time source decisions and RTC updates are logged to Serial and displayed on OLED if error.
+  - See code for details and future extensibility.
 
   ==========================================
   Hardware summary
@@ -239,7 +320,15 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <time.h>
+#include <RTClib.h>
 
+// =============================
+// RTC DS3231 on separate I2C bus (GPIO25=RTC_SDA, GPIO26=RTC_SCL)
+// =============================
+#define RTC_SDA_PIN 25
+#define RTC_SCL_PIN 26
+TwoWire rtcWire = TwoWire(1); // Use I2C bus 1 for RTC
+RTC_DS3231 rtc;
 // =============================
 // Pin Definitions
 // =============================
@@ -628,6 +717,52 @@ void processKey(uint8_t pin,
 // =============================
 
 void setup() {
+      // --- RTC I2C bus init ---
+      rtcWire.begin(RTC_SDA_PIN, RTC_SCL_PIN, 100000); // 100kHz
+      rtc.begin(&rtcWire);
+
+      // --- Time source selection logic ---
+      g_timeSource = TIME_NONE;
+      g_timeValid = false;
+      strcpy(g_timeErrorMsg, "");
+
+      // 1. Try NTP (with timeout, non-blocking)
+      configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+      time_t ntpEpoch = time(nullptr);
+      const time_t validThreshold = 1000000000;
+      unsigned long startNtp = millis();
+      while (ntpEpoch < validThreshold && (millis() - startNtp) < 5000) { // 5s max wait
+        delay(100);
+        ntpEpoch = time(nullptr);
+      }
+      if (ntpEpoch >= validThreshold) {
+        g_timeSource = TIME_NTP;
+        g_timeValid = true;
+        Serial.println("[TIME] NTP time acquired at boot.");
+        logCurrentISTTime();
+        // Set RTC from NTP if RTC is invalid or drift > 2min (done later)
+      } else {
+        // 2. Try RTC
+        DateTime rtcNow = rtc.now();
+        if (isRTCValid(rtcNow)) {
+          setSystemTimeFromRTC(rtcNow);
+          g_timeSource = TIME_RTC;
+          g_timeValid = true;
+          Serial.println("[TIME] RTC used for system time at boot.");
+          logCurrentISTTime();
+        } else {
+          // 3. Neither NTP nor RTC valid
+          g_timeSource = TIME_NONE;
+          g_timeValid = false;
+          strcpy(g_timeErrorMsg, "No valid NTP or RTC time! System paused.");
+          Serial.println("[TIME] ERROR: No valid NTP or RTC time! System paused.");
+        }
+      }
+    // --- One-time RTC initialization from NTP ---
+  #ifdef FIRSTTIME
+    Serial.println("[RTC] FIRSTTIME: Setting DS3231 from NTP (UTC)...");
+    setRTCFromNTP();
+  #endif
   setupSerial();
   setupDisplay();
   setupSensors();
@@ -735,6 +870,28 @@ void setup() {
 // =============================
 
 void loop() {
+  // --- Periodic RTC/NTP drift correction ---
+  if (g_timeValid && g_timeSource == TIME_NTP) {
+    if (now - lastRTCDriftCheck > RTC_NTP_DRIFT_CHECK_INTERVAL_MS) {
+      lastRTCDriftCheck = now;
+      DateTime rtcNow = rtc.now();
+      time_t ntpEpoch = time(nullptr);
+      if (!isRTCValid(rtcNow)) {
+        rtc.adjust(DateTime(ntpEpoch));
+        Serial.println("[RTC] RTC was invalid, set from NTP.");
+        logCurrentISTTime();
+      } else {
+        long drift = llabs((long)ntpEpoch - (long)rtcNow.unixtime());
+        if (drift > RTC_NTP_DRIFT_THRESHOLD_SEC) {
+          rtc.adjust(DateTime(ntpEpoch));
+          Serial.printf("[RTC] RTC drifted by %ld sec (>2min), updated from NTP.\n", drift);
+          logCurrentISTTime();
+        } else {
+          Serial.printf("[RTC] RTC drift %ld sec, within threshold. No update.\n", drift);
+        }
+      }
+    }
+  }
 
   now = millis();
 
@@ -745,8 +902,27 @@ void loop() {
   }
   timeManager.update();
 
+
+  // --- Robust time source check ---
+  if (!g_timeValid) {
+    // No valid time source: show error, pause all logic
+    g_timeString = "--:-- ERR";
+    // Optionally display error on OLED
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_10x20_tf);
+    u8g2.setCursor(0, 24);
+    u8g2.print("TIME ERROR");
+    u8g2.setFont(u8g2_font_7x13B_tf);
+    u8g2.setCursor(0, 44);
+    u8g2.print(g_timeErrorMsg);
+    u8g2.sendBuffer();
+    delay(LOOP_DELAY_MS);
+    return;
+  }
+
+  // --- Normal operation: valid time source ---
   // Get IST time for meal logic and display
-  time_t epoch = timeManager.now();
+  time_t epoch = time(nullptr);
   time_t epochLocal = epoch + IST_OFFSET_SECONDS;
   struct tm t;
   gmtime_r(&epochLocal, &t);
@@ -785,7 +961,7 @@ void loop() {
     // Enqueue sends every 10s (non-blocking for main loop)
     if (((now - lastSensorSend) >= TIME_SYNC_DATA_INTERVAL_MS) ||((g_tokenCount != g_tokenCountPrevious) && (now - lastSensorSend) >= 1000)) {   // 10,000 ms = 10 s
       lastSensorSend = now;
-        g_tokenCountPrevious = g_tokenCount;
+      g_tokenCountPrevious = g_tokenCount;
       Serial.println("updated");
       if (g_sendQueue != nullptr) {
         SendJob job1{ deviceId,  token_data };
