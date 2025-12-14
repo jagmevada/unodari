@@ -9,8 +9,6 @@
 #include <Preferences.h>
 #include <time.h>
 #include <RTClib.h>
-//  #define FIRSTTIME // <-- Uncomment for first RTC setup, then comment out after RTC is set
-
 
 
 // =============================
@@ -478,126 +476,15 @@ inline bool isRTCValid(const DateTime& dt);
 inline void setSystemTimeFromRTC(const DateTime& dt);
 inline void setRTCFromSystemTime();
 inline void logCurrentISTTime();
-void setRTCFromNTP();
+inline void setSystemTimeFromEpoch(time_t e);
 void wifiPortalTask(void *pv) ;
 void wifiManagerTask(void *param);
 static bool tryAcquireTimeFromNTP();
 
-// fetchNetworkTime must be defined before TimeManager uses it
-time_t fetchNetworkTime(unsigned long timeoutMs = 5000) {
-  time_t now = time(nullptr);
-  const time_t validThreshold = 1000000000;
-  unsigned long start = millis();
-  while (now < validThreshold && (millis() - start) < timeoutMs) {
-    delay(50);
-    now = time(nullptr);
-  }
-  if (now < validThreshold) return (time_t)-1;
-  return now;
-}
 
-// TimeManager for NTP sync
-class TimeManager {
-public:
-  TimeManager()
-      : lastSyncedEpoch(0), lastSyncMillis(0), lastAttemptMillis(0),
-        syncIntervalMs(TIME_SYNC_INTERVAL_MS), retryIntervalMs(TIME_RETRY_INTERVAL_MS),
-        lastSyncSuccess(false), lastNoUpdateLogMillis(0) {}
 
-  void begin(unsigned long intervalMs = TIME_SYNC_INTERVAL_MS, unsigned long initialTimeoutMs = TIME_INITIAL_TIMEOUT_MS) {
-    syncIntervalMs = intervalMs;
-    lastAttemptMillis = millis();
-    if (!trySync(initialTimeoutMs)) {
-      lastSyncedEpoch = time(nullptr);
-      lastSyncSuccess = false;
-      lastAttemptMillis = millis();
-      Serial.println("⚠️ TimeManager: Initial NTP sync failed — continuing with local clock");
-    }
-  }
 
-  bool trySync(unsigned long timeoutMs = TIME_SYNC_ATTEMPT_TIMEOUT_MS) {
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("⚠️ TimeManager: NTP sync skipped — WiFi not connected");
-      lastSyncSuccess = false;
-      lastAttemptMillis = millis();
-      return false;
-    }
-    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-    unsigned long attemptStart = millis();
-    time_t epoch = fetchNetworkTime(timeoutMs);
-    unsigned long took = millis() - attemptStart;
-    if (epoch == (time_t)-1) {
-      Serial.printf("⚠️ TimeManager: NTP attempt timed out after %lums (time() still %ld)\n", took, (long)time(nullptr));
-      lastSyncSuccess = false;
-      lastAttemptMillis = millis();
-      return false;
-    }
-    Serial.printf("⏱ TimeManager: NTP returned epoch %ld after %lums\n", (long)epoch, took);
-    if (epoch >= validThreshold) {
-      time_t expected = lastSyncedEpoch + (time_t)((attemptStart - lastSyncMillis) / 1000);
-      long diff = (long)epoch - (long)expected;
-      if (lastSyncMillis == 0 || llabs(diff) > 2) {
-        lastSyncedEpoch = epoch;
-        lastSyncMillis = millis();
-        lastSyncSuccess = true;
-        struct tm tinfo;
-        gmtime_r(&epoch, &tinfo);
-        char buf[32];
-        strftime(buf, sizeof(buf), "%FT%TZ", &tinfo);
-        Serial.printf("⏱ TimeManager: NTP sync succeeded: %s\n", buf);
-        return true;
-      } else {
-        lastSyncSuccess = true;
-        lastSyncMillis = millis();
-        if ((millis() - lastNoUpdateLogMillis) >= retryIntervalMs) {
-          Serial.println("ℹ️ TimeManager: Time check OK — no new NTP update (using local clock)");
-          lastNoUpdateLogMillis = millis();
-        }
-        return false;
-      }
-    }
-    Serial.printf("⚠️ TimeManager: NTP returned invalid epoch: %ld\n", (long)epoch);
-    lastSyncSuccess = false;
-    lastAttemptMillis = millis();
-    return false;
-  }
 
-  void update() {
-    unsigned long nowMs = millis();
-    unsigned long effectiveInterval = lastSyncSuccess ? syncIntervalMs : retryIntervalMs;
-    if (lastSyncSuccess) {
-      if ((nowMs - lastSyncMillis) >= effectiveInterval) {
-        trySync(TIME_SYNC_ATTEMPT_TIMEOUT_MS);
-      }
-    } else {
-      if ((nowMs - lastAttemptMillis) >= effectiveInterval) {
-        trySync(TIME_SYNC_ATTEMPT_TIMEOUT_MS);
-      }
-    }
-  }
-
-  time_t now() const {
-    unsigned long elapsedMs = millis() - lastSyncMillis;
-    return lastSyncedEpoch + (time_t)(elapsedMs / 1000);
-  }
-
-  void getUTCTime(struct tm &out) const {
-    time_t t = now();
-    gmtime_r(&t, &out);
-  }
-
-private:
-  time_t lastSyncedEpoch;
-  unsigned long lastSyncMillis;
-  unsigned long syncIntervalMs;
-  unsigned long retryIntervalMs;
-  bool lastSyncSuccess;
-  unsigned long lastAttemptMillis;
-  unsigned long lastNoUpdateLogMillis;
-  static const time_t validThreshold = 1000000000;
-};
-
-TimeManager timeManager;
 void httpSenderTask(void *pvParameters) ;
 void sendTokenData(const char *id, const TokenData *token_data) ;
 void sendTokenData(const char *id, const TokenData *token_data) {
@@ -638,24 +525,6 @@ void httpSenderTask(void *pvParameters) {
   }
 }
 
-
-// Non-blocking WiFi keep-alive: never starts captive portal, never blocks.
-// void checkWiFi() {
-//   static uint32_t lastAttemptMs = 0;
-
-//   if (WiFi.status() == WL_CONNECTED) return;
-
-//   // update icon
-//   g_wifiLevelIndex = 0;
-
-//   // try reconnect every 10s (non-blocking)
-//   if (millis() - lastAttemptMs < 10000) return;
-//   lastAttemptMs = millis();
-
-//   Serial.println("[WiFi] Disconnected -> WiFi.reconnect()");
-//   WiFi.reconnect();           // returns immediately on ESP32 core
-//   // or WiFi.begin();          // also OK, but reconnect is nicer if creds exist
-// }
 
 
 // =============================
@@ -751,10 +620,12 @@ void setup() {
   time_t ntpEpoch = time(nullptr);
   const time_t validThreshold = 1000000000;
   unsigned long startNtp = millis();
-  while (ntpEpoch < validThreshold && (millis() - startNtp) < 500) { // 0.5s max wait
+  while (ntpEpoch < validThreshold && (millis() - startNtp) < 3000) { // 0.5s max wait
     delay(100);
     ntpEpoch = time(nullptr);
   }
+
+  
   Serial.print("[DEBUG] NTP time at boot: ");
   if (ntpEpoch >= validThreshold) {
     struct tm ntpTm;
@@ -767,13 +638,16 @@ void setup() {
   }
 
   // 9. Set time source and program RTC if needed
-  if (ntpEpoch >= validThreshold) {
-    g_timeSource = TIME_NTP;
-    g_timeValid = true;
-    Serial.println("[TIME] NTP time acquired at boot.");
-    logCurrentISTTime();
-    // Set RTC from NTP if RTC is invalid or drift > 2min (done later)
-  } else {
+if (ntpEpoch >= validThreshold) {
+  g_timeSource = TIME_NTP;
+  g_timeValid = true;
+  // ✅ Set RTC immediately at boot (recommended)
+  setSystemTimeFromEpoch(ntpEpoch);
+  rtc.adjust(DateTime(ntpEpoch));
+
+  Serial.println("[TIME] NTP time acquired at boot.");
+  logCurrentISTTime();
+} else {
     // 2. Try RTC
     DateTime rtcNow = rtc.now();
     if (isRTCValid(rtcNow)) {
@@ -791,11 +665,7 @@ void setup() {
     }
   }
 
-  // 10. (Optional) One-time RTC initialization from NTP if FIRSTTIME is defined
-#ifdef FIRSTTIME
-  Serial.println("[RTC] FIRSTTIME: Setting DS3231 from NTP (UTC)...");
-  setRTCFromNTP();
-#endif
+
 
   // 11. Restore persistent storage (token count, meal, date)
   Serial.println("[STORAGE] Restoring token data from preferences...");
@@ -872,8 +742,6 @@ void loop() {
   now = millis();
   // Always keep trying NTP if time is not valid
   if (!g_timeValid) {
-    // keep background tasks alive
-    timeManager.update();      // optional
     // wifiManagerTask is running on its own core
 
     // Try recover once per second (don’t spam)
@@ -932,7 +800,7 @@ void loop() {
   //   lastWiFiCheck = now;
   //   checkWiFi();
   // }
-  timeManager.update();
+  // timeManager.update();
 
 
 
@@ -1366,9 +1234,8 @@ void IRAM_ATTR isrKey4() {
 
 // Helper: Check if RTC time is valid (not 1970 or too old)
 inline bool isRTCValid(const DateTime& dt) {
-  return dt.year() > 2024;
+  return dt.unixtime() > 1700000000; // ~Nov 2023
 }
-
 // Helper: Set system time from RTC (UTC)
 inline void setSystemTimeFromRTC(const DateTime& dt) {
   struct timeval tv;
@@ -1395,25 +1262,7 @@ inline void logCurrentISTTime() {
 }
 
 
-// One-time RTC initialization from NTP
-#ifdef FIRSTTIME
-void setRTCFromNTP() {
-  // Wait for NTP to be valid
-  time_t ntpEpoch = time(nullptr);
-  const time_t validThreshold = 1000000000;
-  unsigned long start = millis();
-  while (ntpEpoch < validThreshold && (millis() - start) < 15000) { // 15s max wait
-    delay(100);
-    ntpEpoch = time(nullptr);
-  }
-  if (ntpEpoch >= validThreshold) {
-    rtc.adjust(DateTime(ntpEpoch));
-    Serial.println("[RTC] DS3231 set from NTP (UTC) for first time.");
-  } else {
-    Serial.println("[RTC] ERROR: NTP not available, RTC not set.");
-  }
-}
-#endif
+
 
 // void wifiPortalTask(void *pv) {
 //   const String setupName = String(deviceId) + "_SETUP";
@@ -1458,7 +1307,9 @@ void wifiManagerTask(void *param) {
       g_wifiLevelIndex = 4; // optionally map RSSI later
 
       if (g_portalRunning) {
-        wm.stopConfigPortal();      // if available in your WM version
+        // #if defined(WIFIMANAGER_VERSION)  // not perfect
+        wm.stopConfigPortal();
+        //  #endif  
         WiFi.mode(WIFI_STA);        // drop AP mode explicitly
         g_portalRunning = false;
         Serial.println("[WiFi] Connected -> portal stopped, STA-only");
@@ -1477,11 +1328,11 @@ void wifiManagerTask(void *param) {
     }
 
     // Try STA reconnect every ~3s
-    if (millis() - lastReconnectTry > 3000) {
-      lastReconnectTry = millis();
-      Serial.println("[WiFi] Reconnect attempt...");
-      WiFi.reconnect();
-    }
+if (!g_portalRunning && millis() - lastReconnectTry > 3000) {
+  lastReconnectTry = millis();
+  Serial.println("[WiFi] Reconnect attempt...");
+  WiFi.reconnect();
+}
 
     // Start portal once (non-blocking)
     if (!g_portalRunning) {
@@ -1512,10 +1363,16 @@ static bool tryAcquireTimeFromNTP() {
   strcpy(g_timeErrorMsg, "");
 
   // If RTC invalid, set it now
-  DateTime r = rtc.now();
-  if (!isRTCValid(r)) {
-    rtc.adjust(DateTime(e));
-  }
+  setSystemTimeFromEpoch(e);
+  rtc.adjust(DateTime(e));   // you can always set it here
   Serial.println("[TIME] Recovered from NTP in loop.");
   return true;
+}
+
+
+inline void setSystemTimeFromEpoch(time_t e) {
+  struct timeval tv;
+  tv.tv_sec = e;
+  tv.tv_usec = 0;
+  settimeofday(&tv, nullptr);
 }
