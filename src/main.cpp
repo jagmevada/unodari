@@ -481,6 +481,7 @@ inline void logCurrentISTTime();
 void setRTCFromNTP();
 void wifiPortalTask(void *pv) ;
 void wifiManagerTask(void *param);
+static bool tryAcquireTimeFromNTP();
 
 // fetchNetworkTime must be defined before TimeManager uses it
 time_t fetchNetworkTime(unsigned long timeoutMs = 5000) {
@@ -723,6 +724,18 @@ void setup() {
   g_timeValid = false;
   strcpy(g_timeErrorMsg, "");
 
+  // Start WiFiManager in background task (non-blocking)
+
+  xTaskCreatePinnedToCore(
+  wifiManagerTask,
+  "wifi_manager_bg",
+  8192,
+  nullptr,
+  1,
+  nullptr,
+  0
+);
+
   // 7. Print RTC time at boot for debugging
   DateTime rtcNowDebug = rtc.now();
   Serial.print("[DEBUG] RTC time at boot: ");
@@ -738,7 +751,7 @@ void setup() {
   time_t ntpEpoch = time(nullptr);
   const time_t validThreshold = 1000000000;
   unsigned long startNtp = millis();
-  while (ntpEpoch < validThreshold && (millis() - startNtp) < 5000) { // 5s max wait
+  while (ntpEpoch < validThreshold && (millis() - startNtp) < 500) { // 0.5s max wait
     delay(100);
     ntpEpoch = time(nullptr);
   }
@@ -770,11 +783,11 @@ void setup() {
       Serial.println("[TIME] RTC used for system time at boot.");
       logCurrentISTTime();
     } else {
-      // 3. Neither NTP nor RTC valid
-      g_timeSource = TIME_NONE;
-      g_timeValid = false;
-      strcpy(g_timeErrorMsg, "No valid NTP or RTC time! System paused.");
-      Serial.println("[TIME] ERROR: No valid NTP or RTC time! System paused.");
+// 3. Neither NTP nor RTC valid at boot
+    g_timeSource = TIME_NONE;
+    g_timeValid  = false;
+    strcpy(g_timeErrorMsg, "Waiting for NTP...");
+    Serial.println("[TIME] No valid time at boot -> waiting for WiFi/NTP in loop.");
     }
   }
 
@@ -824,88 +837,10 @@ void setup() {
 //   0
 // );
 
-xTaskCreatePinnedToCore(
-  wifiManagerTask,
-  "wifi_manager_bg",
-  8192,
-  nullptr,
-  1,
-  nullptr,
-  0
-);
 
 
  // 13. Wait for NTP sync and initialize meal/date state (NON-BLOCKING BOOT)
 
-if (g_timeSource == TIME_RTC) {
-  Serial.println("[TIME] Using RTC -> skipping NTP wait in setup.");
-} else {
-  Serial.println("[TIME] Trying NTP in setup (max 10s), else continue...");
-
-  // Start SNTP (UTC). It updates time() in background.
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-
-  // Start TimeManager ONCE (it may try an initial sync internally)
-  timeManager.begin(TIME_SYNC_INTERVAL_MS, TIME_INITIAL_TIMEOUT_MS);
-
-  const uint32_t startMs = millis();
-  bool gotValidNtp = false;
-
-  while (millis() - startMs < 10000UL) {
-    // SNTP validity check (simple + reliable)
-    time_t nowEpoch = time(nullptr);
-
-    if (nowEpoch >= 1000000000) {  // valid epoch
-      gotValidNtp = true;
-      g_timeSource = TIME_NTP;
-      g_timeValid = true;
-        // (optional) log
-  Serial.println("[TIME] System time set from NTP.");
-      // Convert UTC -> IST date/time for meal logic
-      time_t epochLocal = nowEpoch + IST_OFFSET_SECONDS;
-      struct tm tIST;
-      gmtime_r(&epochLocal, &tIST);
-
-      char todayIST[11];
-      strftime(todayIST, sizeof(todayIST), "%Y-%m-%d", &tIST);
-
-      int hour = tIST.tm_hour + DUMMYHREFORTESTING;
-
-      mealType currentMealType = NONE;
-      if (hour >= BFL && hour < BFH) currentMealType = BREAKFAST;
-      else if (hour >= LFL && hour <= LFH) currentMealType = LUNCH;
-      else if (hour >= DFL && hour <= DFH) currentMealType = DINNER;
-
-      if (currentMealType == NONE) {
-        Serial.println("[STORAGE] Not in meal time window, token count not modified.");
-      } else if (strcmp(token_data.date, todayIST) == 0 && token_data.meal == currentMealType) {
-        Serial.println("[STORAGE] Same date and meal, keeping token count.");
-      } else {
-        Serial.println("[STORAGE] New date or meal, resetting token count to 0.");
-        token_data.token_count = 0;
-        strncpy(token_data.date, todayIST, sizeof(token_data.date));
-        token_data.date[10] = '\0';
-        token_data.meal = currentMealType;
-        token_data.update = true;
-
-        prefs.begin("tokencfg", false);
-        prefs.putInt("token_count", token_data.token_count);
-        prefs.putInt("meal", token_data.meal);
-        prefs.putString("date", token_data.date);
-        prefs.end();
-      }
-
-      Serial.println("[TIME] NTP acquired in setup.");
-      break;
-    }
-
-    delay(200); // small yield; max 10s total
-  }
-
-  if (!gotValidNtp) {
-    Serial.println("[TIME] NTP not acquired in 10s -> continuing (RTC or local clock).");
-  }
-}
 
 
   // 14. Create a queue for up to 3 send jobs (for HTTP background task)
@@ -935,6 +870,38 @@ if (g_timeSource == TIME_RTC) {
 
 void loop() {
   now = millis();
+  // Always keep trying NTP if time is not valid
+  if (!g_timeValid) {
+    // keep background tasks alive
+    timeManager.update();      // optional
+    // wifiManagerTask is running on its own core
+
+    // Try recover once per second (don’t spam)
+    static uint32_t lastTry = 0;
+    if (now - lastTry > 1000) {
+      lastTry = now;
+      tryAcquireTimeFromNTP();
+    }
+
+    // show error screen but DO NOT return forever without retry
+    g_timeString = "--:--";
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_10x20_tf);
+    u8g2.setCursor(0, 24);
+    u8g2.print("TIME WAIT");
+    u8g2.setFont(u8g2_font_7x13B_tf);
+    u8g2.setCursor(0, 44);
+    u8g2.print("Connect WiFi...");
+    u8g2.sendBuffer();
+
+    delay(20);  // small yield
+    return;     // OK: we return, but we retry each loop
+  }
+
+
+
+
+
   // --- Periodic RTC/NTP drift correction ---
   if (g_timeValid && g_timeSource == TIME_NTP) {
     if (now - lastRTCDriftCheck > RTC_NTP_DRIFT_CHECK_INTERVAL_MS) {
@@ -968,22 +935,6 @@ void loop() {
   timeManager.update();
 
 
-  // --- Robust time source check ---
-  if (!g_timeValid) {
-    // No valid time source: show error, pause all logic
-    g_timeString = "--:-- ERR";
-    // Optionally display error on OLED
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_10x20_tf);
-    u8g2.setCursor(0, 24);
-    u8g2.print("TIME ERROR");
-    u8g2.setFont(u8g2_font_7x13B_tf);
-    u8g2.setCursor(0, 44);
-    u8g2.print(g_timeErrorMsg);
-    u8g2.sendBuffer();
-    delay(LOOP_DELAY_MS);
-    return;
-  }
 
   // --- Normal operation: valid time source ---
   // Get IST time for meal logic and display
@@ -1543,4 +1494,28 @@ void wifiManagerTask(void *param) {
     wm.process();
     vTaskDelay(pdMS_TO_TICKS(50));
   }
+}
+
+
+
+static bool tryAcquireTimeFromNTP() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  // SNTP starts in background; calling again is OK
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+  time_t e = time(nullptr);
+  if (e < 1000000000) return false; // not valid yet
+
+  g_timeSource = TIME_NTP;
+  g_timeValid  = true;
+  strcpy(g_timeErrorMsg, "");
+
+  // If RTC invalid, set it now
+  DateTime r = rtc.now();
+  if (!isRTCValid(r)) {
+    rtc.adjust(DateTime(e));
+  }
+  Serial.println("[TIME] Recovered from NTP in loop.");
+  return true;
 }
