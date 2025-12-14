@@ -1,3 +1,18 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <U8g2lib.h>
+
+#include <WiFiManager.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
+#include <time.h>
+#include <RTClib.h>
+ #define FIRSTTIME // <-- Uncomment for first RTC setup, then comment out after RTC is set
+
+
+
 // =============================
 // RTC/NTP Drift Correction State
 // =============================
@@ -17,56 +32,7 @@ TimeSource g_timeSource = TIME_NONE;
 bool g_timeValid = false;
 char g_timeErrorMsg[48] = "";
 
-// Helper: Check if RTC time is valid (not 1970 or too old)
-bool isRTCValid(const DateTime& dt) {
-  return dt.year() > 2024;
-}
 
-// Helper: Set system time from RTC (UTC)
-void setSystemTimeFromRTC(const DateTime& dt) {
-  struct timeval tv;
-  tv.tv_sec = dt.unixtime();
-  tv.tv_usec = 0;
-  settimeofday(&tv, nullptr);
-}
-
-// Helper: Set RTC from system time (UTC)
-void setRTCFromSystemTime() {
-  time_t nowEpoch = time(nullptr);
-  rtc.adjust(DateTime(nowEpoch));
-}
-
-// Helper: Print current IST time string to Serial
-void logCurrentISTTime() {
-  time_t epoch = time(nullptr) + IST_OFFSET_SECONDS;
-  struct tm t;
-  gmtime_r(&epoch, &t);
-  char buf[32];
-  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S IST", &t);
-  Serial.print("[TIME] Current IST: ");
-  Serial.println(buf);
-}
-#define FIRSTTIME // <-- Uncomment for first RTC setup, then comment out after RTC is set
-
-// One-time RTC initialization from NTP
-#ifdef FIRSTTIME
-void setRTCFromNTP() {
-  // Wait for NTP to be valid
-  time_t ntpEpoch = time(nullptr);
-  const time_t validThreshold = 1000000000;
-  unsigned long start = millis();
-  while (ntpEpoch < validThreshold && (millis() - start) < 15000) { // 15s max wait
-    delay(100);
-    ntpEpoch = time(nullptr);
-  }
-  if (ntpEpoch >= validThreshold) {
-    rtc.adjust(DateTime(ntpEpoch));
-    Serial.println("[RTC] DS3231 set from NTP (UTC) for first time.");
-  } else {
-    Serial.println("[RTC] ERROR: NTP not available, RTC not set.");
-  }
-}
-#endif
 /*
 
   Project overview for Copilot (ESP32 + TCRT + Keypad + OLED UI):
@@ -310,17 +276,7 @@ void setRTCFromNTP() {
     global variables; the drawing functions are pure "view".
 */
 
-#include <Arduino.h>
-#include <Wire.h>
-#include <U8g2lib.h>
 
-#include <WiFiManager.h>
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
-#include <Preferences.h>
-#include <time.h>
-#include <RTClib.h>
 
 // =============================
 // RTC DS3231 on separate I2C bus (GPIO25=RTC_SDA, GPIO26=RTC_SCL)
@@ -491,8 +447,38 @@ struct SendJob {
 // Queue handle for pending HTTP jobs
 QueueHandle_t g_sendQueue = nullptr;
 
-// Forward declaration
+
+// =============================
+// Forward Declarations (all functions defined later)
+// =============================
 void httpSenderTask(void *pvParameters);
+void sendTokenData(const char *id, const TokenData *token_data);
+void checkWiFi();
+void setupSerial();
+void setupDisplay();
+void setupSensors();
+void setupKeypad();
+void readSensors();
+void handleKeypad();
+void updateDisplay();
+void drawScreen();
+void drawBattery(uint8_t levelIndex);
+void drawWifi(uint8_t levelIndex);
+void processKey(uint8_t pin, volatile bool &interruptFlag, uint32_t &lastPressMs, void (*handler)());
+void onKey1Pressed();
+void onKey2Pressed();
+void onKey3Pressed();
+void onKey4Pressed();
+void IRAM_ATTR isrKey1();
+void IRAM_ATTR isrKey2();
+void IRAM_ATTR isrKey3();
+void IRAM_ATTR isrKey4();
+inline bool isRTCValid(const DateTime& dt);
+inline void setSystemTimeFromRTC(const DateTime& dt);
+inline void setRTCFromSystemTime();
+inline void logCurrentISTTime();
+void setRTCFromNTP();
+
 
 
 // fetchNetworkTime must be defined before TimeManager uses it
@@ -1346,3 +1332,55 @@ void IRAM_ATTR isrKey3() {
 void IRAM_ATTR isrKey4() {
   g_key4Interrupt = true;
 }
+
+
+// Helper: Check if RTC time is valid (not 1970 or too old)
+inline bool isRTCValid(const DateTime& dt) {
+  return dt.year() > 2020;
+}
+
+// Helper: Set system time from RTC (UTC)
+inline void setSystemTimeFromRTC(const DateTime& dt) {
+  struct timeval tv;
+  tv.tv_sec = dt.unixtime();
+  tv.tv_usec = 0;
+  settimeofday(&tv, nullptr);
+}
+
+// Helper: Set RTC from system time (UTC)
+inline void setRTCFromSystemTime() {
+  time_t nowEpoch = time(nullptr);
+  rtc.adjust(DateTime(nowEpoch));
+}
+
+// Helper: Print current IST time string to Serial
+inline void logCurrentISTTime() {
+  time_t epoch = time(nullptr) + IST_OFFSET_SECONDS;
+  struct tm t;
+  gmtime_r(&epoch, &t);
+  char buf[32];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S IST", &t);
+  Serial.print("[TIME] Current IST: ");
+  Serial.println(buf);
+}
+
+
+// One-time RTC initialization from NTP
+#ifdef FIRSTTIME
+void setRTCFromNTP() {
+  // Wait for NTP to be valid
+  time_t ntpEpoch = time(nullptr);
+  const time_t validThreshold = 1000000000;
+  unsigned long start = millis();
+  while (ntpEpoch < validThreshold && (millis() - start) < 15000) { // 15s max wait
+    delay(100);
+    ntpEpoch = time(nullptr);
+  }
+  if (ntpEpoch >= validThreshold) {
+    rtc.adjust(DateTime(ntpEpoch));
+    Serial.println("[RTC] DS3231 set from NTP (UTC) for first time.");
+  } else {
+    Serial.println("[RTC] ERROR: NTP not available, RTC not set.");
+  }
+}
+#endif
