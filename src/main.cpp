@@ -348,7 +348,7 @@ RTC_DS3231 rtc;
 // India Standard Time offset from UTC in seconds (+5:30)
 static const long IST_OFFSET_SECONDS = 5 * 3600 + 30 * 60;
 volatile unsigned long now=0; // current time in loop
-volatile unsigned long lastWiFiCheck = 0;
+// volatile unsigned long lastWiFiCheck = 0;
 volatile unsigned long lastEEPROMWrite = 0;
 volatile unsigned long lastSensorSend = 0;
 // =============================
@@ -447,6 +447,7 @@ struct SendJob {
 // Queue handle for pending HTTP jobs
 QueueHandle_t g_sendQueue = nullptr;
 
+static volatile bool g_portalRunning = false;
 
 // =============================
 // Forward Declarations (all functions defined later)
@@ -478,8 +479,8 @@ inline void setSystemTimeFromRTC(const DateTime& dt);
 inline void setRTCFromSystemTime();
 inline void logCurrentISTTime();
 void setRTCFromNTP();
-
-
+void wifiPortalTask(void *pv) ;
+void wifiManagerTask(void *param);
 
 // fetchNetworkTime must be defined before TimeManager uses it
 time_t fetchNetworkTime(unsigned long timeoutMs = 5000) {
@@ -637,26 +638,24 @@ void httpSenderTask(void *pvParameters) {
 }
 
 
-void checkWiFi() {
-  if (WiFi.status() != WL_CONNECTED) {
-    WiFi.disconnect();
-    WiFi.begin();
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-      delay(500);
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-      return;
-    }
-    WiFiManager wm;
-    wm.setConfigPortalTimeout(120);
-    String setupName = String(deviceId) + "_SETUP";
-    if (!wm.autoConnect(setupName.c_str())) {
-      delay(1000);
-      ESP.restart();
-    }
-  }
-}
+// Non-blocking WiFi keep-alive: never starts captive portal, never blocks.
+// void checkWiFi() {
+//   static uint32_t lastAttemptMs = 0;
+
+//   if (WiFi.status() == WL_CONNECTED) return;
+
+//   // update icon
+//   g_wifiLevelIndex = 0;
+
+//   // try reconnect every 10s (non-blocking)
+//   if (millis() - lastAttemptMs < 10000) return;
+//   lastAttemptMs = millis();
+
+//   Serial.println("[WiFi] Disconnected -> WiFi.reconnect()");
+//   WiFi.reconnect();           // returns immediately on ESP32 core
+//   // or WiFi.begin();          // also OK, but reconnect is nicer if creds exist
+// }
+
 
 // =============================
 // OLED Display (U8g2)
@@ -813,42 +812,73 @@ void setup() {
     Serial.println("[STORAGE] Invalid token data in prefs, reset to defaults.");
   }
 
-  // 12. WiFiManager: connect or launch captive portal if needed
-  WiFiManager wm;
-  wm.setConfigPortalTimeout(120);
-  wm.setWiFiAutoReconnect(true);
-  String setupName = String(deviceId) + "_SETUP";
-  if (!wm.autoConnect(setupName.c_str())) {
-    delay(1000);
-    ESP.restart();
-  }
+  // 12. WiFiManager: connect or launch captive portal if needed (now in background task)
+  // Launch WiFiManager in a non-blocking background task. Never restart or block main logic.
+// xTaskCreatePinnedToCore(
+//   wifiPortalTask,
+//   "wifi_portal_bg",
+//   8192,
+//   nullptr,
+//   1,
+//   nullptr,
+//   0
+// );
 
-  // 13. Wait for NTP sync and initialize meal/date state
+xTaskCreatePinnedToCore(
+  wifiManagerTask,
+  "wifi_manager_bg",
+  8192,
+  nullptr,
+  1,
+  nullptr,
+  0
+);
+
+
+ // 13. Wait for NTP sync and initialize meal/date state (NON-BLOCKING BOOT)
+
+if (g_timeSource == TIME_RTC) {
+  Serial.println("[TIME] Using RTC -> skipping NTP wait in setup.");
+} else {
+  Serial.println("[TIME] Trying NTP in setup (max 10s), else continue...");
+
+  // Start SNTP (UTC). It updates time() in background.
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-  while (true) {
-    timeManager.begin(TIME_SYNC_INTERVAL_MS, TIME_INITIAL_TIMEOUT_MS);
-    time_t nowEpoch = timeManager.now();
-    if (nowEpoch >= 1000000000) {
-      struct tm tinfo;
-      timeManager.getUTCTime(tinfo);
-      char buf[32];
-      strftime(buf, sizeof(buf), "%FT%TZ", &tinfo);
-      // Convert NTP to IST date string
+
+  // Start TimeManager ONCE (it may try an initial sync internally)
+  timeManager.begin(TIME_SYNC_INTERVAL_MS, TIME_INITIAL_TIMEOUT_MS);
+
+  const uint32_t startMs = millis();
+  bool gotValidNtp = false;
+
+  while (millis() - startMs < 10000UL) {
+    // SNTP validity check (simple + reliable)
+    time_t nowEpoch = time(nullptr);
+
+    if (nowEpoch >= 1000000000) {  // valid epoch
+      gotValidNtp = true;
+      g_timeSource = TIME_NTP;
+      g_timeValid = true;
+        // (optional) log
+  Serial.println("[TIME] System time set from NTP.");
+      // Convert UTC -> IST date/time for meal logic
       time_t epochLocal = nowEpoch + IST_OFFSET_SECONDS;
       struct tm tIST;
       gmtime_r(&epochLocal, &tIST);
+
       char todayIST[11];
       strftime(todayIST, sizeof(todayIST), "%Y-%m-%d", &tIST);
+
       int hour = tIST.tm_hour + DUMMYHREFORTESTING;
+
       mealType currentMealType = NONE;
-      if (hour >= BFL && hour <= BFH) currentMealType = BREAKFAST;
+      if (hour >= BFL && hour < BFH) currentMealType = BREAKFAST;
       else if (hour >= LFL && hour <= LFH) currentMealType = LUNCH;
       else if (hour >= DFL && hour <= DFH) currentMealType = DINNER;
+
       if (currentMealType == NONE) {
-        // Not a meal time, don't initialize token_data
         Serial.println("[STORAGE] Not in meal time window, token count not modified.");
       } else if (strcmp(token_data.date, todayIST) == 0 && token_data.meal == currentMealType) {
-        // Keep token_count
         Serial.println("[STORAGE] Same date and meal, keeping token count.");
       } else {
         Serial.println("[STORAGE] New date or meal, resetting token count to 0.");
@@ -857,17 +887,26 @@ void setup() {
         token_data.date[10] = '\0';
         token_data.meal = currentMealType;
         token_data.update = true;
+
         prefs.begin("tokencfg", false);
         prefs.putInt("token_count", token_data.token_count);
         prefs.putInt("meal", token_data.meal);
         prefs.putString("date", token_data.date);
         prefs.end();
       }
+
+      Serial.println("[TIME] NTP acquired in setup.");
       break;
-    } else {
-      delay(2000);
     }
+
+    delay(200); // small yield; max 10s total
   }
+
+  if (!gotValidNtp) {
+    Serial.println("[TIME] NTP not acquired in 10s -> continuing (RTC or local clock).");
+  }
+}
+
 
   // 14. Create a queue for up to 3 send jobs (for HTTP background task)
   g_sendQueue = xQueueCreate(3, sizeof(SendJob));
@@ -895,6 +934,7 @@ void setup() {
 // =============================
 
 void loop() {
+  now = millis();
   // --- Periodic RTC/NTP drift correction ---
   if (g_timeValid && g_timeSource == TIME_NTP) {
     if (now - lastRTCDriftCheck > RTC_NTP_DRIFT_CHECK_INTERVAL_MS) {
@@ -918,13 +958,13 @@ void loop() {
     }
   }
 
-  now = millis();
+  
 
   // WiFi check every 10s
-  if (now - lastWiFiCheck > 10000) {
-    lastWiFiCheck = now;
-    checkWiFi();
-  }
+  // if (now - lastWiFiCheck > 10000) {
+  //   lastWiFiCheck = now;
+  //   checkWiFi();
+  // }
   timeManager.update();
 
 
@@ -1423,3 +1463,84 @@ void setRTCFromNTP() {
   }
 }
 #endif
+
+// void wifiPortalTask(void *pv) {
+//   const String setupName = String(deviceId) + "_SETUP";
+
+//   for (;;) {
+//     if (WiFi.status() != WL_CONNECTED) {
+//       Serial.println("[WiFi] Starting captive portal (background)...");
+//       WiFiManager wm;
+//       wm.setConfigPortalTimeout(120);
+//       wm.setWiFiAutoReconnect(true);
+
+//       // IMPORTANT: do NOT call ESP.restart() on failure; just retry later
+//       bool ok = wm.autoConnect(setupName.c_str());
+//       if (ok) {
+//         Serial.println("[WiFi] Connected via portal.");
+//       } else {
+//         Serial.println("[WiFi] Portal timed out / failed. Retrying later.");
+//         vTaskDelay(pdMS_TO_TICKS(30000));
+//       }
+//     } else {
+//       vTaskDelay(pdMS_TO_TICKS(10000));
+//     }
+//   }
+// }
+void wifiManagerTask(void *param) {
+  String setupName = String(deviceId) + "_SETUP";
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+
+  WiFiManager wm;
+  wm.setWiFiAutoReconnect(true);
+  wm.setConfigPortalBlocking(false);
+  wm.setConfigPortalTimeout(0);
+  wm.setConnectTimeout(5);
+  wm.setConnectRetries(2);
+
+  uint32_t lastReconnectTry = 0;
+
+  for (;;) {
+    if (WiFi.status() == WL_CONNECTED) {
+      g_wifiLevelIndex = 4; // optionally map RSSI later
+
+      if (g_portalRunning) {
+        wm.stopConfigPortal();      // if available in your WM version
+        WiFi.mode(WIFI_STA);        // drop AP mode explicitly
+        g_portalRunning = false;
+        Serial.println("[WiFi] Connected -> portal stopped, STA-only");
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(500));
+      continue;
+    }
+
+    // Not connected
+    g_wifiLevelIndex = 0;
+
+    // If portal is running, ensure AP+STA (critical)
+    if (g_portalRunning) {
+      WiFi.mode(WIFI_AP_STA);
+    }
+
+    // Try STA reconnect every ~3s
+    if (millis() - lastReconnectTry > 3000) {
+      lastReconnectTry = millis();
+      Serial.println("[WiFi] Reconnect attempt...");
+      WiFi.reconnect();
+    }
+
+    // Start portal once (non-blocking)
+    if (!g_portalRunning) {
+      Serial.println("[WiFi] Starting captive portal (non-blocking)...");
+      WiFi.mode(WIFI_AP_STA);                 // ensure STA can still connect
+      wm.startConfigPortal(setupName.c_str()); // returns quickly
+      g_portalRunning = true;
+    }
+
+    wm.process();
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
