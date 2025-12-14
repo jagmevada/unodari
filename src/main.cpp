@@ -739,6 +739,18 @@ if (ntpEpoch >= validThreshold) {
 // =============================
 
 void loop() {
+    // --- Update WiFi signal strength bar (g_wifiLevelIndex) based on RSSI ---
+    if (WiFi.status() == WL_CONNECTED) {
+      long rssi = WiFi.RSSI();
+      // Map RSSI to 4 bars: 0 = no network, 1 = weak, 2 = fair, 3 = good, 4 = excellent
+      if (rssi >= -55) g_wifiLevelIndex = 4;         // Excellent
+      else if (rssi >= -65) g_wifiLevelIndex = 3;    // Good
+      else if (rssi >= -75) g_wifiLevelIndex = 2;    // Fair
+      else if (rssi >= -85) g_wifiLevelIndex = 1;    // Weak
+      else g_wifiLevelIndex = 0;                     // No/very poor signal
+    } else {
+      g_wifiLevelIndex = 0; // Not connected
+    }
   now = millis();
   // Always keep trying NTP if time is not valid
   if (!g_timeValid) {
