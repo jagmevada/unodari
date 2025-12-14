@@ -321,12 +321,12 @@ RTC_DS3231 rtc;
 #define TOKEN_MERGE_WINDOW_MS  110UL    // if events are closer than this, count as one token
 
 // Meal window macros (IST)
-#define BFL 7
+#define BFL 0
 #define BFH 9
 #define LFL 11
 #define LFH 14
 #define DFL 18
-#define DFH 23
+#define DFH 21
 #define DUMMYHREFORTESTING 0 // Set to 0 for production, >0 for testing
 
 // Time sync config
@@ -786,6 +786,7 @@ void setup() {
 #endif
 
   // 11. Restore persistent storage (token count, meal, date)
+  Serial.println("[STORAGE] Restoring token data from preferences...");
   prefs.begin("tokencfg", true); // read-only
   token_data.token_count = prefs.getInt("token_count", 0);
   token_data.meal = (mealType)prefs.getInt("meal", NONE);
@@ -796,6 +797,9 @@ void setup() {
   bool valid = true;
   if (token_data.meal < NONE || token_data.meal >= MEAL_COUNT) valid = false;
   if (strlen(token_data.date) != 10) valid = false;
+  Serial.printf("[STORAGE] Restored token_data: count=%d, meal=%d, date=%s\n",
+                token_data.token_count, (int)token_data.meal, token_data.date);
+                g_tokenCount= token_data.token_count;
   if (!valid) {
     token_data.token_count = 0;
     token_data.meal = NONE;
@@ -806,6 +810,7 @@ void setup() {
     prefs.putInt("meal", token_data.meal);
     prefs.putString("date", token_data.date);
     prefs.end();
+    Serial.println("[STORAGE] Invalid token data in prefs, reset to defaults.");
   }
 
   // 12. WiFiManager: connect or launch captive portal if needed
@@ -836,14 +841,17 @@ void setup() {
       strftime(todayIST, sizeof(todayIST), "%Y-%m-%d", &tIST);
       int hour = tIST.tm_hour + DUMMYHREFORTESTING;
       mealType currentMealType = NONE;
-      if (hour >= BFL && hour < BFH) currentMealType = BREAKFAST;
-      else if (hour >= LFL && hour < LFH) currentMealType = LUNCH;
-      else if (hour >= DFL && hour < DFH) currentMealType = DINNER;
+      if (hour >= BFL && hour <= BFH) currentMealType = BREAKFAST;
+      else if (hour >= LFL && hour <= LFH) currentMealType = LUNCH;
+      else if (hour >= DFL && hour <= DFH) currentMealType = DINNER;
       if (currentMealType == NONE) {
         // Not a meal time, don't initialize token_data
+        Serial.println("[STORAGE] Not in meal time window, token count not modified.");
       } else if (strcmp(token_data.date, todayIST) == 0 && token_data.meal == currentMealType) {
         // Keep token_count
+        Serial.println("[STORAGE] Same date and meal, keeping token count.");
       } else {
+        Serial.println("[STORAGE] New date or meal, resetting token count to 0.");
         token_data.token_count = 0;
         strncpy(token_data.date, todayIST, sizeof(token_data.date));
         token_data.date[10] = '\0';
@@ -960,8 +968,8 @@ void loop() {
 
   // Determine meal window
   if (hour >= BFL && hour < BFH) token_data.meal = BREAKFAST;
-  else if (hour >= LFL && hour < LFH) token_data.meal = LUNCH;
-  else if (hour >= DFL && hour < DFH) token_data.meal = DINNER;
+  else if (hour >= LFL && hour <= LFH) token_data.meal = LUNCH;
+  else if (hour >= DFL && hour <= DFH) token_data.meal = DINNER;
   else token_data.meal = NONE;
 
   // IR sensor logic and token counting
@@ -1000,7 +1008,7 @@ void loop() {
   }
 
   // EEPROM save every 20s or if update flag set
-  if ((now - lastEEPROMWrite >= 20000) || token_data.update == true) {
+  if ((now - lastEEPROMWrite >= 10000) || token_data.update == true) {
     lastEEPROMWrite = now;
     token_data.update = false;
     prefs.begin("tokencfg", false);
@@ -1112,7 +1120,7 @@ void readSensors() {
           Serial.println("Token event: +10 (bundle)");
         } else {
           g_tokenCount += 1;
-          Serial.println("Token event: +1");
+          // Serial.println("Token event: +1");
         }
 
         if (g_tokenCount > 9999) {
@@ -1125,7 +1133,7 @@ void readSensors() {
     }
 
     // Serial debug output (for plotting / diagnostics)
-    Serial.print(">");
+    // Serial.print(">");
     // Serial.print("S1A:");
     // Serial.print(g_sensor1Analog);
     // Serial.print(",D1:");
