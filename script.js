@@ -2,7 +2,10 @@
 const SUPABASE_URL = "https://akxcjabakrvfaevdfwru.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFreGNqYWJha3J2ZmFldmRmd3J1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDkxMjMwMjUsImV4cCI6MjA2NDY5OTAyNX0.kykki4uVVgkSVU4lH-wcuGRdyu2xJ1CQkYFhQq_u08w";
 
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// Create a Supabase client instance. Use a different local name to avoid
+// colliding with any existing global `supabase` identifier provided by
+// other scripts or the environment.
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // List of devices
 const devices = ["uno_1", "uno_2", "uno_3"];
@@ -64,7 +67,7 @@ async function loadData() {
     for (let sensor of devices) {
         
 
-        const { data, error } = await supabase
+        const { data, error } = await supabaseClient
             .from("unodari_token")
             .select("*")
             .eq("sensor_id", sensor)
@@ -167,7 +170,7 @@ function formatTimestamp(ts) {
 loadData();
 
 // Auto-refresh every 10 seconds
-// setInterval(loadData, 10000);
+setInterval(loadData, 10000);
 
 // Update highlight every minute to catch time changes
 setInterval(highlightActiveMeal, 60000);
