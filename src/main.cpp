@@ -315,6 +315,9 @@ RTC_DS3231 rtc;
 #define BUTTON_DEBOUNCE_MS     50UL   // debounce time for keypad (in ms)
 #define LOOP_DELAY_MS          1UL    // main loop delay, keep small for fast sampling
 
+// NEW: Deterministic sensor task period (ms)
+#define SENSOR_TASK_PERIOD_MS  2UL
+
 // Analog sampling and Schmitt trigger thresholds for IR
 #define IR_SAMPLE_INTERVAL_MS  1UL    // sample analog inputs every 1ms
 #define IR_LTH                 50   // low threshold for Schmitt trigger
@@ -489,6 +492,9 @@ inline void setSystemTimeFromEpoch(time_t e);
 void wifiPortalTask(void *pv) ;
 void wifiManagerTask(void *param);
 static bool tryAcquireTimeFromNTP();
+
+// NEW: Sensor sampling task forward declaration
+void sensorTask(void *pv);
 
 
 
@@ -740,6 +746,17 @@ if (ntpEpoch >= validThreshold) {
   }
 
   // 15. Final system ready message
+  // NEW: Start sensor task for deterministic 2ms sampling
+  xTaskCreatePinnedToCore(
+    sensorTask,
+    "sensorTask",
+    4096,
+    nullptr,
+    2,      // priority higher than WiFi/http tasks
+    nullptr,
+    1       // run on core 1
+  );
+
   Serial.println("System initialized.");
 }
 
@@ -853,7 +870,7 @@ void loop() {
   else token_data.meal = NONE;
 
   // IR sensor logic and token counting
-  readSensors(); // This will increment g_tokenCount on valid IR event
+  // readSensors(); // Moved to sensorTask for deterministic timing
   // Sync g_tokenCount to token_data if in meal window
   if (token_data.meal != NONE) {
     token_data.token_count = g_tokenCount;
@@ -1328,6 +1345,8 @@ void wifiManagerTask(void *param) {
   String setupName = String(deviceId) + "_SETUP";
 
   WiFi.mode(WIFI_STA);
+
+
   WiFi.setAutoReconnect(true);
 
   WiFiManager wm;
@@ -1414,4 +1433,14 @@ inline void setSystemTimeFromEpoch(time_t e) {
   tv.tv_sec = e;
   tv.tv_usec = 0;
   settimeofday(&tv, nullptr);
+}
+
+// NEW: Dedicated sensor sampling task running at fixed period
+void sensorTask(void *pv) {
+  const TickType_t periodTicks = pdMS_TO_TICKS(SENSOR_TASK_PERIOD_MS);
+  TickType_t lastWake = xTaskGetTickCount();
+  for (;;) {
+    readSensors();
+    vTaskDelayUntil(&lastWake, periodTicks);
+  }
 }
