@@ -945,7 +945,14 @@ void setupKeypad() {
 // =============================
 
 void readSensors() {
+  static uint32_t lastCallMs = 0;
   uint32_t now = millis();
+  if (lastCallMs != 0) {
+     Serial.print(">");
+    Serial.print("T:");
+    Serial.println(now - lastCallMs);
+  }
+  lastCallMs = now;
 
   // Sample analog IR only every IR_SAMPLE_INTERVAL_MS
   if (now - g_lastIrSampleMs >= IR_SAMPLE_INTERVAL_MS) {
@@ -1023,19 +1030,16 @@ void readSensors() {
     }
 
     // Serial debug output (for plotting / diagnostics)
-    Serial.print(">");
-    Serial.print("S1A:");
-    Serial.print(g_sensor1Analog);
-    Serial.print(",D1:");
-    Serial.print(g_sensor1Digital);
-    Serial.print(",S2A:");
-    Serial.print(g_sensor2Analog);
-    Serial.print(",D2:");
-    Serial.print(g_sensor2Digital);
-    Serial.print(",S3A:");
-    Serial.print(g_sensor3Analog);
-    Serial.print(",CNT:");
-    Serial.println(g_tokenCount);
+    // Serial.print(">");
+    // Serial.print("S1A:");
+    // Serial.print(g_sensor1Analog);
+
+    // Serial.print(",S2A:");
+    // Serial.print(g_sensor2Analog);
+
+    // Serial.print(",S3A:");
+    // Serial.println(g_sensor3Analog);
+
   }
 }
 
