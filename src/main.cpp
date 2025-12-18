@@ -293,6 +293,7 @@ RTC_DS3231 rtc;
 #define KEY3_PIN  19   // Button "3"
 #define KEY4_PIN  18   // Button "4"
 
+
 // TCRT5000 Sensor 1
 #define S1_D0_PIN 23   // Digital (not used for counting)
 #define S1_A0_PIN 32   // Analog (used for counting)
@@ -300,6 +301,10 @@ RTC_DS3231 rtc;
 // TCRT5000 Sensor 2
 #define S2_D0_PIN 16   // Digital (not used for counting)
 #define S2_A0_PIN 33   // Analog (used for counting)
+
+// TCRT5000 Sensor 3 (NEW)
+#define S3_A0_PIN 35   // Analog (used for counting)
+// D0 not used for S3
 
 // I2C pins for ESP32 (OLED) - hardware default: SDA=21, SCL=22
 
@@ -312,8 +317,8 @@ RTC_DS3231 rtc;
 
 // Analog sampling and Schmitt trigger thresholds for IR
 #define IR_SAMPLE_INTERVAL_MS  1UL    // sample analog inputs every 1ms
-#define IR_LTH                 2200   // low threshold for Schmitt trigger
-#define IR_HTH                 2700   // high threshold for Schmitt trigger
+#define IR_LTH                 50   // low threshold for Schmitt trigger
+#define IR_HTH                 100   // high threshold for Schmitt trigger
 
 // Time window for OR-ing between two sensors (ms)
 #define TOKEN_MERGE_WINDOW_MS  110UL    // if events are closer than this, count as one token
@@ -353,15 +358,19 @@ volatile unsigned long lastSensorSend = 0;
 // Global State
 // =============================
 
+
 // Sensor readings (for debug / plotting)
 int  g_sensor1Analog = 0;
 int  g_sensor2Analog = 0;
+int  g_sensor3Analog = 0;      // NEW: Sensor 3 analog
 bool g_sensor1Digital = false;
 bool g_sensor2Digital = false;
+// No digital for sensor 3
 
 // Schmitt trigger state for each sensor (true = high region, false = low region)
 bool g_s1HighRegion = true;
 bool g_s2HighRegion = true;
+bool g_s3HighRegion = true;    // NEW: Sensor 3 Schmitt state
 
 // Token counter 0..9999
 int  g_tokenCount = 0;
@@ -915,6 +924,7 @@ void setupDisplay() {
 void setupSensors() {
   pinMode(S1_D0_PIN, INPUT);
   pinMode(S2_D0_PIN, INPUT);
+  // pinMode(S3_A0_PIN, INPUT); // NEW: Sensor 3 analog pin
   analogReadResolution(12);  // 0..4095 on ESP32
 }
 
@@ -944,21 +954,21 @@ void readSensors() {
     // Analog reads
     g_sensor1Analog = analogRead(S1_A0_PIN);
     g_sensor2Analog = analogRead(S2_A0_PIN);
+    g_sensor3Analog = analogRead(S3_A0_PIN); // NEW: Sensor 3
 
     // Optional digital reads (for debug only, NOT used for counting)
     g_sensor1Digital = digitalRead(S1_D0_PIN);
     g_sensor2Digital = digitalRead(S2_D0_PIN);
+    // No digital for sensor 3
 
     // ----- Schmitt trigger & event detection for Sensor 1 -----
     bool s1Event = false;
     if (g_s1HighRegion) {
-      // High region → look for dip below low threshold (Lth)
       if (g_sensor1Analog <= IR_LTH) {
-        s1Event = true;           // local event on S1
-        g_s1HighRegion = false;   // move to low region
+        s1Event = true;
+        g_s1HighRegion = false;
       }
     } else {
-      // Low region → wait to go back above high threshold (Hth) to re-arm
       if (g_sensor1Analog >= IR_HTH) {
         g_s1HighRegion = true;
       }
@@ -968,8 +978,8 @@ void readSensors() {
     bool s2Event = false;
     if (g_s2HighRegion) {
       if (g_sensor2Analog <= IR_LTH) {
-        s2Event = true;           // local event on S2
-        g_s2HighRegion = false;   // move to low region
+        s2Event = true;
+        g_s2HighRegion = false;
       }
     } else {
       if (g_sensor2Analog >= IR_HTH) {
@@ -977,11 +987,22 @@ void readSensors() {
       }
     }
 
-    // OR logic between sensors with merge window
-    bool tokenEvent = s1Event || s2Event;
+    // ----- Schmitt trigger & event detection for Sensor 3 (NEW) -----
+    bool s3Event = false;
+    if (g_s3HighRegion) {
+      if (g_sensor3Analog <= IR_LTH) {
+        s3Event = true;
+        g_s3HighRegion = false;
+      }
+    } else {
+      if (g_sensor3Analog >= IR_HTH) {
+        g_s3HighRegion = true;
+      }
+    }
+
+    // OR logic between sensors with merge window (any of 3 sensors)
+    bool tokenEvent = s1Event || s2Event || s3Event;
     if (tokenEvent) {
-      // If this event is sufficiently separated from the last one,
-      // treat it as a new token. Otherwise, same token across two sensors.
       if (now - g_lastTokenEventMs >= TOKEN_MERGE_WINDOW_MS) {
         g_lastTokenEventMs = now;
 
@@ -991,30 +1012,30 @@ void readSensors() {
           Serial.println("Token event: +10 (bundle)");
         } else {
           g_tokenCount += 1;
-          // Serial.println("Token event: +1");
         }
 
         if (g_tokenCount > 9999) {
           g_tokenCount = 9999;
         }
       } else {
-        // Within merge window: treat as same physical token → ignore for count
         Serial.println("Token event merged (same token across sensors)");
       }
     }
 
     // Serial debug output (for plotting / diagnostics)
-    // Serial.print(">");
-    // Serial.print("S1A:");
-    // Serial.print(g_sensor1Analog);
-    // Serial.print(",D1:");
-    // Serial.print(g_sensor1Digital);
-    // Serial.print(",S2A:");
-    // Serial.print(g_sensor2Analog);
-    // Serial.print(",D2:");
-    // Serial.print(g_sensor2Digital);
-    // Serial.print(",CNT:");
-    // Serial.println(g_tokenCount);
+    Serial.print(">");
+    Serial.print("S1A:");
+    Serial.print(g_sensor1Analog);
+    Serial.print(",D1:");
+    Serial.print(g_sensor1Digital);
+    Serial.print(",S2A:");
+    Serial.print(g_sensor2Analog);
+    Serial.print(",D2:");
+    Serial.print(g_sensor2Digital);
+    Serial.print(",S3A:");
+    Serial.print(g_sensor3Analog);
+    Serial.print(",CNT:");
+    Serial.println(g_tokenCount);
   }
 }
 
