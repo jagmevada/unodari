@@ -312,11 +312,11 @@ RTC_DS3231 rtc;
 // Config Macros
 // =============================
 
-#define BUTTON_DEBOUNCE_MS     50UL   // debounce time for keypad (in ms)
+#define BUTTON_DEBOUNCE_MS     100UL   // debounce time for keypad (in ms)
 #define LOOP_DELAY_MS          1UL    // main loop delay, keep small for fast sampling
 
 // NEW: Deterministic sensor task period (ms)
-#define SENSOR_TASK_PERIOD_MS  2UL
+#define SENSOR_TASK_PERIOD_MS  5UL
 
 // Analog sampling and Schmitt trigger thresholds for IR
 #define IR_SAMPLE_INTERVAL_MS  1UL    // sample analog inputs every 1ms
@@ -324,7 +324,7 @@ RTC_DS3231 rtc;
 #define IR_HTH                 100   // high threshold for Schmitt trigger
 
 // Time window for OR-ing between two sensors (ms)
-#define TOKEN_MERGE_WINDOW_MS  110UL    // if events are closer than this, count as one token
+#define TOKEN_MERGE_WINDOW_MS  120UL    // if events are closer than this, count as one token
 
 // Meal window macros (IST)
 #define BFL 0
@@ -391,6 +391,15 @@ uint32_t g_lastTokenEventMs = 0;
 
 // Last pressed key info (for debug/Serial/logging)
 String g_lastKeyPressed = "None";
+
+// =============================
+// Sensor Task Metrics (timing/health)
+// =============================
+volatile uint32_t g_sensorCallsTotal = 0;     // total invocations since boot
+volatile uint32_t g_sensorCallsPerSec = 0;    // rolling count per second
+volatile uint32_t g_sensorLastDtMs = 0;       // last inter-call dt in ms
+volatile uint32_t g_sensorMaxDtMs = 0;        // max dt observed in the last reporting window
+volatile uint32_t g_sensorDeadlineMisses = 0; // count of dt exceeding expected period+margin
 
 // Interrupt flags for buttons (set in ISR, handled in loop)
 volatile bool g_key1Interrupt = false;
@@ -831,6 +840,22 @@ void loop() {
     }
   }
 
+  // --- Sensor task metrics reporting (once per second) ---
+  {
+    static uint32_t lastReportMs = 0;
+    if (now - lastReportMs >= 1000) {
+      lastReportMs = now;
+      Serial.printf("[sensorTask] calls/s=%lu max_dt_ms=%lu last_dt_ms=%lu deadline_miss=%lu\n",
+                    (unsigned long)g_sensorCallsPerSec,
+                    (unsigned long)g_sensorMaxDtMs,
+                    (unsigned long)g_sensorLastDtMs,
+                    (unsigned long)g_sensorDeadlineMisses);
+      // reset rolling metrics window
+      g_sensorCallsPerSec = 0;
+      g_sensorMaxDtMs = 0;
+    }
+  }
+
   
 
   // WiFi check every 10s
@@ -964,12 +989,12 @@ void setupKeypad() {
 void readSensors() {
   static uint32_t lastCallMs = 0;
   uint32_t now = millis();
-  if (lastCallMs != 0) {
-     Serial.print(">");
-    Serial.print("T:");
-    Serial.println(now - lastCallMs);
-  }
-  lastCallMs = now;
+  // if (lastCallMs != 0) {
+  //    Serial.print(">");
+  //   Serial.print("T:");
+  //   Serial.println(now - lastCallMs);
+  // }
+  // lastCallMs = now;
 
   // Sample analog IR only every IR_SAMPLE_INTERVAL_MS
   if (now - g_lastIrSampleMs >= IR_SAMPLE_INTERVAL_MS) {
@@ -981,8 +1006,8 @@ void readSensors() {
     g_sensor3Analog = analogRead(S3_A0_PIN); // NEW: Sensor 3
 
     // Optional digital reads (for debug only, NOT used for counting)
-    g_sensor1Digital = digitalRead(S1_D0_PIN);
-    g_sensor2Digital = digitalRead(S2_D0_PIN);
+    // g_sensor1Digital = digitalRead(S1_D0_PIN);
+    // g_sensor2Digital = digitalRead(S2_D0_PIN);
     // No digital for sensor 3
 
     // ----- Schmitt trigger & event detection for Sensor 1 -----
@@ -1033,7 +1058,7 @@ void readSensors() {
         if (g_addBundle10) {
           g_tokenCount += 10;
           g_addBundle10 = false;  // one-shot bundle
-          Serial.println("Token event: +10 (bundle)");
+          // Serial.println("Token event: +10 (bundle)");
         } else {
           g_tokenCount += 1;
         }
@@ -1047,15 +1072,15 @@ void readSensors() {
     }
 
     // Serial debug output (for plotting / diagnostics)
-    // Serial.print(">");
-    // Serial.print("S1A:");
-    // Serial.print(g_sensor1Analog);
+  //   Serial.print(">");
+  //   Serial.print("S1A:");
+  //   Serial.print(g_sensor1Analog);
 
-    // Serial.print(",S2A:");
-    // Serial.print(g_sensor2Analog);
+  //   Serial.print(",S2A:");
+  //   Serial.print(g_sensor2Analog);
 
-    // Serial.print(",S3A:");
-    // Serial.println(g_sensor3Analog);
+  //   Serial.print(",S3A:");
+  //   Serial.println(g_sensor3Analog);
 
   }
 }
@@ -1440,6 +1465,24 @@ void sensorTask(void *pv) {
   const TickType_t periodTicks = pdMS_TO_TICKS(SENSOR_TASK_PERIOD_MS);
   TickType_t lastWake = xTaskGetTickCount();
   for (;;) {
+    // Timing metrics
+    uint32_t msNow;
+    msNow = millis();
+    static uint32_t prevMs = 0;
+    if (prevMs != 0) {
+      uint32_t dt = msNow - prevMs;
+      g_sensorLastDtMs = dt;
+      if (dt > g_sensorMaxDtMs) g_sensorMaxDtMs = dt;
+      // Consider deadline miss if dt exceeds period + small margin (1ms)
+      if (dt > (SENSOR_TASK_PERIOD_MS + 1)) {
+        g_sensorDeadlineMisses++;
+      }
+    }
+    prevMs = msNow;
+
+    g_sensorCallsTotal++;
+    g_sensorCallsPerSec++;
+
     readSensors();
     vTaskDelayUntil(&lastWake, periodTicks);
   }
