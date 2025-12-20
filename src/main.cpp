@@ -326,13 +326,16 @@ RTC_DS3231 rtc;
 // Time window for OR-ing between two sensors (ms)
 #define TOKEN_MERGE_WINDOW_MS  250UL    // if events are closer than this, count as one token
 
+// Hold time for combo reset: Keys 1 + 4 pressed simultaneously
+#define COMBO_RESET_HOLD_MS    1000UL
+
 // Meal window macros (IST)
-#define BFL 0
+#define BFL 6
 #define BFH 9
 #define LFL 11
 #define LFH 14
 #define DFL 18
-#define DFH 21
+#define DFH 22
 #define DUMMYHREFORTESTING 0 // Set to 0 for production, >0 for testing
 
 // Time sync config
@@ -377,8 +380,8 @@ bool g_s3HighRegion = true;    // NEW: Sensor 3 Schmitt state
 
 // Token counter 0..9999
 int  g_tokenCount = 0;
-// Bundle +10 flag (Key2 sets, then next token event uses +10 and clears it)
-bool g_addBundle10 = false;
+// One-shot bundle size for the next token event. 0 = normal +1.
+uint8_t g_bundleAdd = 0;
 
 // Track previous token count for immediate HTTP send
 int g_tokenCountPrevious = 0;
@@ -1055,12 +1058,10 @@ void readSensors() {
       if (now - g_lastTokenEventMs >= TOKEN_MERGE_WINDOW_MS) {
         g_lastTokenEventMs = now;
 
-        if (g_addBundle10) {
-          g_tokenCount += 10;
-          g_addBundle10 = false;  // one-shot bundle
-          // Serial.println("Token event: +10 (bundle)");
-        } else {
-          g_tokenCount += 1;
+        int add = (g_bundleAdd > 0) ? g_bundleAdd : 1;
+        g_tokenCount += add;
+        if (g_bundleAdd > 0) {
+          g_bundleAdd = 0; // one-shot
         }
 
         if (g_tokenCount > 9999) {
@@ -1114,37 +1115,142 @@ void processKey(uint8_t pin,
 }
 
 void handleKeypad() {
-  processKey(KEY1_PIN, g_key1Interrupt, g_key1LastPressMs, onKey1Pressed);
-  processKey(KEY2_PIN, g_key2Interrupt, g_key2LastPressMs, onKey2Pressed);
-  processKey(KEY3_PIN, g_key3Interrupt, g_key3LastPressMs, onKey3Pressed);
-  processKey(KEY4_PIN, g_key4Interrupt, g_key4LastPressMs, onKey4Pressed);
+  uint32_t nowMs = millis();
+
+  // Poll current raw states (active LOW)
+  bool k1 = (digitalRead(KEY1_PIN) == LOW);
+  bool k2 = (digitalRead(KEY2_PIN) == LOW);
+  bool k3 = (digitalRead(KEY3_PIN) == LOW);
+  bool k4 = (digitalRead(KEY4_PIN) == LOW);
+
+  // Debounced press/release tracking
+  static bool k1Down = false, k2Down = false, k3Down = false, k4Down = false;
+  static uint32_t k1DownMs = 0, k2DownMs = 0, k3DownMs = 0, k4DownMs = 0;
+
+  // Combo tracking for 1 + 4
+  static bool comboActive = false;
+  static uint32_t comboStartMs = 0;
+  static bool comboResetDone = false;
+  static bool ignoreSinglesAfterCombo = false;
+
+  // --- Debounced PRESS events ---
+  if (k1 && !k1Down && (nowMs - g_key1LastPressMs >= BUTTON_DEBOUNCE_MS)) {
+    k1Down = true;
+    k1DownMs = nowMs;
+    g_key1LastPressMs = nowMs;
+  }
+  if (k2 && !k2Down && (nowMs - g_key2LastPressMs >= BUTTON_DEBOUNCE_MS)) {
+    k2Down = true;
+    k2DownMs = nowMs;
+    g_key2LastPressMs = nowMs;
+  }
+  if (k3 && !k3Down && (nowMs - g_key3LastPressMs >= BUTTON_DEBOUNCE_MS)) {
+    k3Down = true;
+    k3DownMs = nowMs;
+    g_key3LastPressMs = nowMs;
+  }
+  if (k4 && !k4Down && (nowMs - g_key4LastPressMs >= BUTTON_DEBOUNCE_MS)) {
+    k4Down = true;
+    k4DownMs = nowMs;
+    g_key4LastPressMs = nowMs;
+  }
+
+  // --- Combo handling (Keys 1 + 4) ---
+  bool bothDown = k1Down && k4Down;
+  if (bothDown) {
+    if (!comboActive) {
+      comboActive = true;
+      ignoreSinglesAfterCombo = true; // suppress single actions on release
+      comboStartMs = (k1DownMs > k4DownMs) ? k1DownMs : k4DownMs;
+      comboResetDone = false;
+      Serial.println("[Keypad] Combo 1+4 started");
+    }
+    if (!comboResetDone && (nowMs - comboStartMs >= COMBO_RESET_HOLD_MS)) {
+      g_tokenCount = 0;
+      g_lastKeyPressed = "Combo 1+4 Reset";
+      comboResetDone = true;
+      Serial.println("Keys 1+4 held 1s -> Counter RESET");
+    }
+  }
+
+  // --- Debounced RELEASE events ---
+  bool k1Released = (!k1 && k1Down && (nowMs - g_key1LastPressMs >= BUTTON_DEBOUNCE_MS));
+  bool k2Released = (!k2 && k2Down && (nowMs - g_key2LastPressMs >= BUTTON_DEBOUNCE_MS));
+  bool k3Released = (!k3 && k3Down && (nowMs - g_key3LastPressMs >= BUTTON_DEBOUNCE_MS));
+  bool k4Released = (!k4 && k4Down && (nowMs - g_key4LastPressMs >= BUTTON_DEBOUNCE_MS));
+
+  if (k1Released) {
+    k1Down = false;
+    g_key1LastPressMs = nowMs;
+    if (!ignoreSinglesAfterCombo) {
+      g_bundleAdd = 10; // single press Key 1 -> bundle +10
+      g_lastKeyPressed = "Key 1 Bundle +10";
+      Serial.println("Key 1 single -> Next token = +10");
+    }
+  }
+
+  if (k2Released) {
+    k2Down = false;
+    g_key2LastPressMs = nowMs;
+    g_bundleAdd = 20; // single press Key 2 -> bundle +20
+    g_lastKeyPressed = "Key 2 Bundle +20";
+    Serial.println("Key 2 single -> Next token = +20");
+  }
+
+  if (k3Released) {
+    k3Down = false;
+    g_key3LastPressMs = nowMs;
+    g_bundleAdd = 30; // single press Key 3 -> bundle +30
+    g_lastKeyPressed = "Key 3 Bundle +30";
+    Serial.println("Key 3 single -> Next token = +30");
+  }
+
+  if (k4Released) {
+    k4Down = false;
+    g_key4LastPressMs = nowMs;
+    if (!ignoreSinglesAfterCombo) {
+      g_lastKeyPressed = "Key 4 (reserved)";
+      Serial.println("Key 4 single (reserved)");
+    }
+  }
+
+  // If combo ended (both not down), clear combo-related flags
+  if (!k1Down && !k4Down) {
+    if (comboActive || ignoreSinglesAfterCombo || comboResetDone) {
+      comboActive = false;
+      ignoreSinglesAfterCombo = false;
+      comboResetDone = false;
+      comboStartMs = 0;
+    }
+  }
 }
 
 // =============================
 // Button Press Handlers
 // =============================
 
-// Key 1 → Reset token counter
+// Key 1 → Bundle +10 (handled on release in handleKeypad)
 void onKey1Pressed() {
-  g_tokenCount = 0;
-  g_lastKeyPressed = "Key 1 Reset";
-  Serial.println("Key 1 pressed -> Counter RESET");
+  g_bundleAdd = 10;
+  g_lastKeyPressed = "Key 1 Bundle +10";
+  Serial.println("Key 1 pressed -> Next token = +10 bundle");
 }
 
-// Key 2 → Enable +10 bundle for next token event
+// Key 2 → Bundle +20
 void onKey2Pressed() {
-  g_addBundle10 = true;
-  g_lastKeyPressed = "Key 2 Bundle +10";
-  Serial.println("Key 2 pressed -> Next token = +10 bundle");
+  g_bundleAdd = 20;
+  g_lastKeyPressed = "Key 2 Bundle +20";
+  Serial.println("Key 2 pressed -> Next token = +20 bundle");
 }
 
-// Key 3 → Reserved
+// Key 3 → Bundle +30
 void onKey3Pressed() {
-  g_lastKeyPressed = "Key 3 (reserved)";
-  Serial.println("Key 3 pressed (reserved)");
+  g_bundleAdd = 30;
+  g_lastKeyPressed = "Key 3 Bundle +30";
+  Serial.println("Key 3 pressed -> Next token = +30 bundle");
 }
 
-// Key 4 → Reserved
+// Key 4 → Reserved (single press)
 void onKey4Pressed() {
   g_lastKeyPressed = "Key 4 (reserved)";
   Serial.println("Key 4 pressed (reserved)");
@@ -1383,6 +1489,15 @@ void wifiManagerTask(void *param) {
   wm.setConnectRetries(3);
   // Ensure we break out of portal processing after successful config
   wm.setBreakAfterConfig(true);
+
+  // Close portal immediately after credentials are saved to avoid lingering
+  // "Saving credentials..." status page and switch to STA mode.
+  wm.setSaveConfigCallback([&]() {
+    Serial.println("[WiFi] Credentials saved -> closing portal & connecting");
+    wm.stopConfigPortal();
+    g_portalRunning = false;
+    WiFi.mode(WIFI_STA);
+  });
 
   uint32_t disconnectSince = 0;
   uint32_t lastReconnectTry = 0;
