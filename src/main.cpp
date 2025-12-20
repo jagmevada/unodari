@@ -320,11 +320,11 @@ RTC_DS3231 rtc;
 
 // Analog sampling and Schmitt trigger thresholds for IR
 #define IR_SAMPLE_INTERVAL_MS  1UL    // sample analog inputs every 1ms
-#define IR_LTH                 50   // low threshold for Schmitt trigger
-#define IR_HTH                 100   // high threshold for Schmitt trigger
+#define IR_LTH                 400   // low threshold for Schmitt trigger
+#define IR_HTH                 3000   // high threshold for Schmitt trigger
 
 // Time window for OR-ing between two sensors (ms)
-#define TOKEN_MERGE_WINDOW_MS  120UL    // if events are closer than this, count as one token
+#define TOKEN_MERGE_WINDOW_MS  250UL    // if events are closer than this, count as one token
 
 // Meal window macros (IST)
 #define BFL 0
@@ -1378,8 +1378,11 @@ void wifiManagerTask(void *param) {
   wm.setWiFiAutoReconnect(true);
   wm.setConfigPortalBlocking(false);
   wm.setConfigPortalTimeout(0);     // keep portal running
-  wm.setConnectTimeout(5);
-  wm.setConnectRetries(2);
+  // Give enough time for new credentials to connect
+  wm.setConnectTimeout(15);
+  wm.setConnectRetries(3);
+  // Ensure we break out of portal processing after successful config
+  wm.setBreakAfterConfig(true);
 
   uint32_t disconnectSince = 0;
   uint32_t lastReconnectTry = 0;
@@ -1406,12 +1409,12 @@ void wifiManagerTask(void *param) {
     g_wifiLevelIndex = 0;
     if (disconnectSince == 0) disconnectSince = millis();
 
-    // ALWAYS try reconnect every few seconds (even if portal is running)
-    if (millis() - lastReconnectTry > 3000) {
+    // Try reconnect periodically ONLY when portal is NOT active
+    if (!g_portalRunning && (millis() - lastReconnectTry > 3000)) {
       lastReconnectTry = millis();
       Serial.println("[WiFi] Reconnect attempt...");
-      WiFi.mode(WIFI_AP_STA);   // safe: keeps STA alive while portal runs
-      WiFi.reconnect();         // or WiFi.begin();
+      WiFi.mode(WIFI_STA);
+      WiFi.reconnect();         // uses last saved credentials
     }
 
     // Start portal only after some time disconnected (tune this)
@@ -1424,6 +1427,7 @@ void wifiManagerTask(void *param) {
 
     // Portal must be processed continuously once started
     if (g_portalRunning) {
+      // Let WiFiManager handle STA connection attempts; avoid manual reconnects here
       wm.process();
     }
 
