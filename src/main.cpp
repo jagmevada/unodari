@@ -515,7 +515,6 @@ void sensorTask(void *pv);
 
 
 void httpSenderTask(void *pvParameters) ;
-void sendTokenData(const char *id, const TokenData *token_data) ;
 void sendTokenData(const char *id, const TokenData *token_data) {
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -779,50 +778,63 @@ if (ntpEpoch >= validThreshold) {
 // =============================
 
 void loop() {
+        // --- Update currentMeal based on meal window logic ---
+        int hour = 0;
+        time_t epoch = time(nullptr) + 19800; // IST offset +5:30
+        struct tm t;
+        gmtime_r(&epoch, &t);
+        hour = t.tm_hour;
+        mealType newMeal = NONE;
+        if (hour >= BFL && hour < BFH) newMeal = BREAKFAST;
+        else if (hour >= LFL && hour <= LFH) newMeal = LUNCH;
+        else if (hour >= DFL && hour <= DFH) newMeal = DINNER;
+        else newMeal = NONE;
+        currentMeal = newMeal;
+
         // --- Fetch peer device data for OLED (uno_1 fetches uno_2 and uno_3) ---
-        static uint32_t lastPeerFetch = 0;
-        if (strcmp(deviceId, "uno_1") == 0 && WiFi.status() == WL_CONNECTED) {
+        if (strcmp(deviceId, "uno_1") == 0 && WiFi.status() == WL_CONNECTED && currentMeal != NONE) {
+          static uint32_t lastPeerFetch = 0;
           uint32_t nowFetch = millis();
           if (nowFetch - lastPeerFetch > 10000) { // fetch every 10s
             lastPeerFetch = nowFetch;
-            // Get today's date in IST
-            time_t epoch = time(nullptr) + 19800; // IST offset +5:30
-            struct tm t;
-            gmtime_r(&epoch, &t);
             char dateStr[11];
             strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &t);
-            // Helper lambda to fetch peer data (capture dateStr)
-            auto fetchPeer = [&dateStr](const char* peerId, TokenData* peerData, const char* apikey) {
-              HTTPClient http;
-              String url = String(postURL) + "?sensor_id=eq." + peerId + "&date=eq." + peerData->date;
-              http.begin(url);
-              http.addHeader("apikey", apikey);
-              int code = http.GET();
-              Serial.printf("[PeerFetch] GET %s -> code %d\n", url.c_str(), code);
-              if (code == 200) {
-                String payload = http.getString();
-                JsonDocument doc;
-                DeserializationError err = deserializeJson(doc, payload);
-                if (!err && doc.is<JsonArray>() && doc.size() > 0) {
-                  JsonObject obj = doc[0];
-                  peerData->token_count = obj["breakfast"] | 0;
-                  strncpy(peerData->date, obj["date"] | dateStr, sizeof(peerData->date));
-                  peerData->date[10] = '\0';
-                  Serial.printf("[PeerFetch] %s: token_count=%d, date=%s\n", peerId, peerData->token_count, peerData->date);
+            auto fetchPeer = [&dateStr](const char* peerId, TokenData* peerData, const char* apikey, mealType meal) {
+                HTTPClient http;
+                String url = String(postURL) + "?sensor_id=eq." + peerId + "&date=eq." + peerData->date;
+                http.begin(url);
+                http.addHeader("apikey", apikey);
+                int code = http.GET();
+                Serial.printf("[PeerFetch] GET %s -> code %d\n", url.c_str(), code);
+                if (code == 200) {
+                    String payload = http.getString();
+                    JsonDocument doc;
+                    DeserializationError err = deserializeJson(doc, payload);
+                    if (!err && doc.is<JsonArray>() && doc.size() > 0) {
+                        JsonObject obj = doc[0];
+                        int mealCount = 0;
+                        if (meal == BREAKFAST) mealCount = obj["breakfast"] | 0;
+                        else if (meal == LUNCH) mealCount = obj["lunch"] | 0;
+                        else if (meal == DINNER) mealCount = obj["dinner"] | 0;
+                        peerData->token_count = mealCount;
+                        strncpy(peerData->date, obj["date"] | dateStr, sizeof(peerData->date));
+                        peerData->date[10] = '\0';
+                        peerData->meal = meal;
+                        Serial.printf("[PeerFetch] %s: meal=%d, count=%d, date=%s\n", peerId, (int)meal, mealCount, peerData->date);
+                    } else {
+                        Serial.printf("[PeerFetch] %s: JSON parse error or empty array\n", peerId);
+                    }
                 } else {
-                  Serial.printf("[PeerFetch] %s: JSON parse error or empty array\n", peerId);
+                    Serial.printf("[PeerFetch] %s: HTTP GET failed\n", peerId);
                 }
-              } else {
-                Serial.printf("[PeerFetch] %s: HTTP GET failed\n", peerId);
-              }
-              http.end();
+                http.end();
             };
-            strncpy(token_data2.date, dateStr, sizeof(token_data2.date));
-            token_data2.date[10] = '\0';
-            fetchPeer(deviceId2, &token_data2, apikey);
-            strncpy(token_data3.date, dateStr, sizeof(token_data3.date));
-            token_data3.date[10] = '\0';
-            fetchPeer(deviceId3, &token_data3, apikey);
+                strncpy(token_data2.date, dateStr, sizeof(token_data2.date));
+                token_data2.date[10] = '\0';
+                fetchPeer(deviceId2, &token_data2, apikey, currentMeal);
+                strncpy(token_data3.date, dateStr, sizeof(token_data3.date));
+                token_data3.date[10] = '\0';
+                fetchPeer(deviceId3, &token_data3, apikey, currentMeal);
           }
         }
       // --- Bundle timeout: if bundle set and expired, reset to default ---
@@ -924,13 +936,12 @@ void loop() {
 
   // --- Normal operation: valid time source ---
   // Get IST time for meal logic and display
-  time_t epoch = time(nullptr);
+
   time_t epochLocal = epoch + IST_OFFSET_SECONDS;
-  struct tm t;
   gmtime_r(&epochLocal, &t);
   char dateStr[11];
   strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &t);
-  int hour = t.tm_hour + DUMMYHREFORTESTING;
+ 
   strncpy(token_data.date, dateStr, sizeof(token_data.date));
   token_data.date[10] = '\0';
 
@@ -1476,10 +1487,10 @@ void drawScreen() {
   u8g2.print(buf);
 
   // Small counters line just below main counter
-  // For uno_1: show T:592 (left), M:596 (center), Σ:sum (right)
+  // For uno_1: show T:<peer uno_2> (left), M:<peer uno_3> (center), Σ:sum (right) using real peer data for current meal
   if (strcmp(deviceId, "uno_1") == 0) {
-    int tCount = 592;
-    int mCount = 596;
+    int tCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0;
+    int mCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0;
     int sum = g_tokenCount + tCount + mCount;
     // Small font
     u8g2.setFont(u8g2_font_5x8_mf);
