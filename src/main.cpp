@@ -1360,8 +1360,8 @@ void drawScreen() {
 
   // Dynamic header: D/M/T based on deviceId
   char titleChar = 'D';
-  if (strcmp(deviceId, "uno_2") == 0) titleChar = 'M';
-  else if (strcmp(deviceId, "uno_3") == 0) titleChar = 'T';
+  if (strcmp(deviceId, "uno_2") == 0) titleChar = 'T';
+  else if (strcmp(deviceId, "uno_3") == 0) titleChar = 'M';
   u8g2.setFont(u8g2_font_10x20_tf);
   u8g2.setCursor(x0, y);
   u8g2.print(titleChar);
@@ -1446,70 +1446,32 @@ inline void logCurrentISTTime() {
   Serial.println(buf);
 }
 
-
-
-
-// void wifiPortalTask(void *pv) {
-//   const String setupName = String(deviceId) + "_SETUP";
-
-//   for (;;) {
-//     if (WiFi.status() != WL_CONNECTED) {
-//       Serial.println("[WiFi] Starting captive portal (background)...");
-//       WiFiManager wm;
-//       wm.setConfigPortalTimeout(120);
-//       wm.setWiFiAutoReconnect(true);
-
-//       // IMPORTANT: do NOT call ESP.restart() on failure; just retry later
-//       bool ok = wm.autoConnect(setupName.c_str());
-//       if (ok) {
-//         Serial.println("[WiFi] Connected via portal.");
-//       } else {
-//         Serial.println("[WiFi] Portal timed out / failed. Retrying later.");
-//         vTaskDelay(pdMS_TO_TICKS(30000));
-//       }
-//     } else {
-//       vTaskDelay(pdMS_TO_TICKS(10000));
-//     }
-//   }
-// }
 void wifiManagerTask(void *param) {
   String setupName = String(deviceId) + "_SETUP";
 
   WiFi.mode(WIFI_STA);
-
-
   WiFi.setAutoReconnect(true);
 
   WiFiManager wm;
   wm.setWiFiAutoReconnect(true);
   wm.setConfigPortalBlocking(false);
-  wm.setConfigPortalTimeout(0);     // keep portal running
-  // Give enough time for new credentials to connect
+  wm.setConfigPortalTimeout(120);
   wm.setConnectTimeout(15);
   wm.setConnectRetries(3);
-  // Ensure we break out of portal processing after successful config
   wm.setBreakAfterConfig(true);
-
-  // Close portal immediately after credentials are saved to avoid lingering
-  // "Saving credentials..." status page and switch to STA mode.
-  wm.setSaveConfigCallback([&]() {
-    Serial.println("[WiFi] Credentials saved -> closing portal & connecting");
-    wm.stopConfigPortal();
-    g_portalRunning = false;
-    WiFi.mode(WIFI_STA);
-  });
 
   uint32_t disconnectSince = 0;
   uint32_t lastReconnectTry = 0;
 
   for (;;) {
-    const bool connected = (WiFi.status() == WL_CONNECTED);
+    bool connected = (WiFi.status() == WL_CONNECTED);
 
     if (connected) {
       g_wifiLevelIndex = 4;
       disconnectSince = 0;
 
-      if (g_portalRunning) {
+      // Close any running portal once we have WiFi
+      if (wm.getConfigPortalActive()) {
         wm.stopConfigPortal();
         WiFi.mode(WIFI_STA);
         g_portalRunning = false;
@@ -1524,26 +1486,31 @@ void wifiManagerTask(void *param) {
     g_wifiLevelIndex = 0;
     if (disconnectSince == 0) disconnectSince = millis();
 
-    // Try reconnect periodically ONLY when portal is NOT active
-    if (!g_portalRunning && (millis() - lastReconnectTry > 3000)) {
+    // Always keep trying to reconnect, even while portal is active
+    if (millis() - lastReconnectTry > 3000) {
       lastReconnectTry = millis();
       Serial.println("[WiFi] Reconnect attempt...");
       WiFi.mode(WIFI_STA);
-      WiFi.reconnect();         // uses last saved credentials
+      WiFi.reconnect(); // uses saved creds
     }
 
-    // Start portal only after some time disconnected (tune this)
-    if (!g_portalRunning && (millis() - disconnectSince > 15000)) {
+    // Start portal after some time disconnected
+    if (!wm.getConfigPortalActive() && (millis() - disconnectSince > 15000)) {
       Serial.println("[WiFi] Disconnected -> starting portal...");
       WiFi.mode(WIFI_AP_STA);
-      wm.startConfigPortal(setupName.c_str());
+      wm.startConfigPortal(setupName.c_str()); // non-blocking because blocking=false
       g_portalRunning = true;
     }
 
-    // Portal must be processed continuously once started
-    if (g_portalRunning) {
-      // Let WiFiManager handle STA connection attempts; avoid manual reconnects here
+    // Process portal if running; if STA gets IP during portal, close it
+    if (wm.getConfigPortalActive()) {
       wm.process();
+      if (WiFi.status() == WL_CONNECTED) {
+        wm.stopConfigPortal();
+        WiFi.mode(WIFI_STA);
+        g_portalRunning = false;
+        Serial.println("[WiFi] Connected during portal -> portal stopped");
+      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(50));
