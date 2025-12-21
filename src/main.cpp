@@ -335,7 +335,7 @@ RTC_DS3231 rtc;
 #define LFL 11
 #define LFH 14
 #define DFL 18
-#define DFH 22
+#define DFH 23
 #define DUMMYHREFORTESTING 0 // Set to 0 for production, >0 for testing
 
 // Time sync config
@@ -382,6 +382,8 @@ bool g_s3HighRegion = true;    // NEW: Sensor 3 Schmitt state
 int  g_tokenCount = 0;
 // One-shot bundle size for the next token event. 0 = normal +1.
 uint8_t g_bundleAdd = 0;
+// Timestamp when bundle was set (for timeout)
+uint32_t g_bundleSetMs = 0;
 
 // Track previous token count for immediate HTTP send
 int g_tokenCountPrevious = 0;
@@ -777,6 +779,10 @@ if (ntpEpoch >= validThreshold) {
 // =============================
 
 void loop() {
+      // --- Bundle timeout: if bundle set and expired, reset to default ---
+      if (g_bundleAdd > 0 && (millis() - g_bundleSetMs > 5000)) {
+        g_bundleAdd = 0;
+      }
     // --- Update WiFi signal strength bar (g_wifiLevelIndex) based on RSSI ---
     if (WiFi.status() == WL_CONNECTED) {
       long rssi = WiFi.RSSI();
@@ -1058,6 +1064,10 @@ void readSensors() {
       if (now - g_lastTokenEventMs >= TOKEN_MERGE_WINDOW_MS) {
         g_lastTokenEventMs = now;
 
+        // Check bundle timeout: if set and expired, ignore bundle
+        if (g_bundleAdd > 0 && (millis() - g_bundleSetMs > 5000)) {
+          g_bundleAdd = 0;
+        }
         int add = (g_bundleAdd > 0) ? g_bundleAdd : 1;
         g_tokenCount += add;
         if (g_bundleAdd > 0) {
@@ -1184,6 +1194,7 @@ void handleKeypad() {
     g_key1LastPressMs = nowMs;
     if (!ignoreSinglesAfterCombo) {
       g_bundleAdd = 10; // single press Key 1 -> bundle +10
+      g_bundleSetMs = nowMs;
       g_lastKeyPressed = "Key 1 Bundle +10";
       Serial.println("Key 1 single -> Next token = +10");
     }
@@ -1193,6 +1204,7 @@ void handleKeypad() {
     k2Down = false;
     g_key2LastPressMs = nowMs;
     g_bundleAdd = 20; // single press Key 2 -> bundle +20
+    g_bundleSetMs = nowMs;
     g_lastKeyPressed = "Key 2 Bundle +20";
     Serial.println("Key 2 single -> Next token = +20");
   }
@@ -1201,6 +1213,7 @@ void handleKeypad() {
     k3Down = false;
     g_key3LastPressMs = nowMs;
     g_bundleAdd = 30; // single press Key 3 -> bundle +30
+    g_bundleSetMs = nowMs;
     g_lastKeyPressed = "Key 3 Bundle +30";
     Serial.println("Key 3 single -> Next token = +30");
   }
