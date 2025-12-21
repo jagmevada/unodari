@@ -334,12 +334,12 @@ RTC_DS3231 rtc;
 #define COMBO_RESET_HOLD_MS    1000UL
 
 // Meal window macros (IST)
-#define BFL 0
+#define BFL 5
 #define BFH 9
 #define LFL 11
 #define LFH 14
 #define DFL 18
-#define DFH 23
+#define DFH 21
 #define DUMMYHREFORTESTING 0 // Set to 0 for production, >0 for testing
 
 // Time sync config
@@ -811,24 +811,34 @@ if (ntpEpoch >= validThreshold) {
 void loop() {
 
   // ---- Loop stack high-water mark monitor (1 Hz) ----
-  static uint32_t lastStackPrintMs = 0;
-  uint32_t nowMs = millis();
+//   static uint32_t lastStackPrintMs = 0;
+//   uint32_t nowMs = millis();
 
-  if (nowMs - lastStackPrintMs >= 1000) {
-    lastStackPrintMs = nowMs;
+//   if (nowMs - lastStackPrintMs >= 1000) {
+//     lastStackPrintMs = nowMs;
+// time_t epoch = time(nullptr);
+// struct tm utc;
+// gmtime_r(&epoch, &utc);
 
-    // High-water mark is in WORDS (4 bytes per word)
-    UBaseType_t hw = uxTaskGetStackHighWaterMark(NULL);
+// time_t istEpoch = epoch + 19800;
+// struct tm ist;
+// gmtime_r(&istEpoch, &ist);
 
-    Serial.printf("loopTask HW=%u words (%u bytes free)\n",
-                  hw,
-                  hw * sizeof(StackType_t));
-Serial.printf("loop HW=%u words, heap=%u, minHeap=%u\n",
-              uxTaskGetStackHighWaterMark(NULL),
-              ESP.getFreeHeap(),
-              ESP.getMinFreeHeap());
+// Serial.printf("[CHK] UTC=%02d:%02d  IST=%02d:%02d\n",
+//               utc.tm_hour, utc.tm_min, ist.tm_hour, ist.tm_min);
 
-  }
+// //     // High-water mark is in WORDS (4 bytes per word)
+// //     UBaseType_t hw = uxTaskGetStackHighWaterMark(NULL);
+
+// //     Serial.printf("loopTask HW=%u words (%u bytes free)\n",
+// //                   hw,
+// //                   hw * sizeof(StackType_t));
+// // Serial.printf("loop HW=%u words, heap=%u, minHeap=%u\n",
+// //               uxTaskGetStackHighWaterMark(NULL),
+// //               ESP.getFreeHeap(),
+// //               ESP.getMinFreeHeap());
+
+//   }
 
           fetchPeerDataIfNeeded();
         // --- Update currentMeal based on meal window logic ---
@@ -943,7 +953,7 @@ Serial.printf("loop HW=%u words, heap=%u, minHeap=%u\n",
   // --- Normal operation: valid time source ---
   // Get IST time for meal logic and display
 
-  time_t epochLocal = epoch + IST_OFFSET_SECONDS;
+  time_t epochLocal = epoch ;//+ IST_OFFSET_SECONDS;
   gmtime_r(&epochLocal, &t);
   char dateStr[11];
   strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &t);
