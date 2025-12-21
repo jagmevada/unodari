@@ -330,7 +330,7 @@ RTC_DS3231 rtc;
 #define COMBO_RESET_HOLD_MS    1000UL
 
 // Meal window macros (IST)
-#define BFL 6
+#define BFL 0
 #define BFH 9
 #define LFL 11
 #define LFH 14
@@ -779,6 +779,52 @@ if (ntpEpoch >= validThreshold) {
 // =============================
 
 void loop() {
+        // --- Fetch peer device data for OLED (uno_1 fetches uno_2 and uno_3) ---
+        static uint32_t lastPeerFetch = 0;
+        if (strcmp(deviceId, "uno_1") == 0 && WiFi.status() == WL_CONNECTED) {
+          uint32_t nowFetch = millis();
+          if (nowFetch - lastPeerFetch > 10000) { // fetch every 10s
+            lastPeerFetch = nowFetch;
+            // Get today's date in IST
+            time_t epoch = time(nullptr) + 19800; // IST offset +5:30
+            struct tm t;
+            gmtime_r(&epoch, &t);
+            char dateStr[11];
+            strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &t);
+            // Helper lambda to fetch peer data (capture dateStr)
+            auto fetchPeer = [&dateStr](const char* peerId, TokenData* peerData, const char* apikey) {
+              HTTPClient http;
+              String url = String(postURL) + "?sensor_id=eq." + peerId + "&date=eq." + peerData->date;
+              http.begin(url);
+              http.addHeader("apikey", apikey);
+              int code = http.GET();
+              Serial.printf("[PeerFetch] GET %s -> code %d\n", url.c_str(), code);
+              if (code == 200) {
+                String payload = http.getString();
+                JsonDocument doc;
+                DeserializationError err = deserializeJson(doc, payload);
+                if (!err && doc.is<JsonArray>() && doc.size() > 0) {
+                  JsonObject obj = doc[0];
+                  peerData->token_count = obj["breakfast"] | 0;
+                  strncpy(peerData->date, obj["date"] | dateStr, sizeof(peerData->date));
+                  peerData->date[10] = '\0';
+                  Serial.printf("[PeerFetch] %s: token_count=%d, date=%s\n", peerId, peerData->token_count, peerData->date);
+                } else {
+                  Serial.printf("[PeerFetch] %s: JSON parse error or empty array\n", peerId);
+                }
+              } else {
+                Serial.printf("[PeerFetch] %s: HTTP GET failed\n", peerId);
+              }
+              http.end();
+            };
+            strncpy(token_data2.date, dateStr, sizeof(token_data2.date));
+            token_data2.date[10] = '\0';
+            fetchPeer(deviceId2, &token_data2, apikey);
+            strncpy(token_data3.date, dateStr, sizeof(token_data3.date));
+            token_data3.date[10] = '\0';
+            fetchPeer(deviceId3, &token_data3, apikey);
+          }
+        }
       // --- Bundle timeout: if bundle set and expired, reset to default ---
       if (g_bundleAdd > 0 && (millis() - g_bundleSetMs > 5000)) {
         g_bundleAdd = 0;
@@ -854,11 +900,11 @@ void loop() {
     static uint32_t lastReportMs = 0;
     if (now - lastReportMs >= 1000) {
       lastReportMs = now;
-      Serial.printf("[sensorTask] calls/s=%lu max_dt_ms=%lu last_dt_ms=%lu deadline_miss=%lu\n",
-                    (unsigned long)g_sensorCallsPerSec,
-                    (unsigned long)g_sensorMaxDtMs,
-                    (unsigned long)g_sensorLastDtMs,
-                    (unsigned long)g_sensorDeadlineMisses);
+      //  Serial.printf("[sensorTask] calls/s=%lu max_dt_ms=%lu last_dt_ms=%lu deadline_miss=%lu\n",
+      //               (unsigned long)g_sensorCallsPerSec,
+      //               (unsigned long)g_sensorMaxDtMs,
+      //               (unsigned long)g_sensorLastDtMs,
+      //               (unsigned long)g_sensorDeadlineMisses);
       // reset rolling metrics window
       g_sensorCallsPerSec = 0;
       g_sensorMaxDtMs = 0;
@@ -1314,7 +1360,7 @@ void drawBattery(uint8_t levelIndex) {
 // Draw a WiFi/signal icon as vertical bars left of the battery.
 // levelIndex: 0..4
 //  0 -> circle with slash (no network)
-//  1..4 -> that many bars (like 4G)
+//  1..4 -> that many bars
 void drawWifi(uint8_t levelIndex) {
   if (levelIndex > 4) levelIndex = 4;
 
