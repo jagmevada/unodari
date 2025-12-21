@@ -13,6 +13,7 @@
 #include <RTClib.h>
 
 
+
 // =============================
 // RTC/NTP Drift Correction State
 // =============================
@@ -491,6 +492,9 @@ static volatile bool g_portalRunning = false;
 // =============================
 void httpSenderTask(void *pvParameters);
 void sendTokenData(const char *id, const TokenData *token_data);
+void fetchPeer(const char* peerId, TokenData* peerData, const char* apikey, mealType meal, const char* dateStr);
+void peerFetchTask(void* pv);
+void fetchPeerDataIfNeeded();
 void checkWiFi();
 void setupSerial();
 void setupDisplay();
@@ -614,6 +618,19 @@ void processKey(uint8_t pin,
 // =============================
 
 void setup() {
+    // --- Peer fetch queue and task ---
+    if (peerFetchQueue == nullptr) {
+      peerFetchQueue = xQueueCreate(2, sizeof(PeerFetchRequest));
+    }
+    xTaskCreatePinnedToCore(
+      peerFetchTask,
+      "peerFetchTask",
+      16384,
+      nullptr,
+      1, // low/medium priority
+      nullptr,
+      1 // core 1
+    );
   // 1. Initialize serial port for debug output
   setupSerial();
 
@@ -792,6 +809,28 @@ if (ntpEpoch >= validThreshold) {
 // =============================
 
 void loop() {
+
+  // ---- Loop stack high-water mark monitor (1 Hz) ----
+  static uint32_t lastStackPrintMs = 0;
+  uint32_t nowMs = millis();
+
+  if (nowMs - lastStackPrintMs >= 1000) {
+    lastStackPrintMs = nowMs;
+
+    // High-water mark is in WORDS (4 bytes per word)
+    UBaseType_t hw = uxTaskGetStackHighWaterMark(NULL);
+
+    Serial.printf("loopTask HW=%u words (%u bytes free)\n",
+                  hw,
+                  hw * sizeof(StackType_t));
+Serial.printf("loop HW=%u words, heap=%u, minHeap=%u\n",
+              uxTaskGetStackHighWaterMark(NULL),
+              ESP.getFreeHeap(),
+              ESP.getMinFreeHeap());
+
+  }
+
+          fetchPeerDataIfNeeded();
         // --- Update currentMeal based on meal window logic ---
         int hour = 0;
         time_t epoch = time(nullptr) + 19800; // IST offset +5:30
@@ -804,53 +843,6 @@ void loop() {
         else if (hour >= DFL && hour <= DFH) newMeal = DINNER;
         else newMeal = NONE;
         currentMeal = newMeal;
-
-        // --- Fetch peer device data for OLED (uno_1 fetches uno_2 and uno_3) ---
-        if (strcmp(deviceId, "uno_1") == 0 && WiFi.status() == WL_CONNECTED && currentMeal != NONE) {
-          static uint32_t lastPeerFetch = 0;
-          uint32_t nowFetch = millis();
-          if (nowFetch - lastPeerFetch > 10000) { // fetch every 10s
-            lastPeerFetch = nowFetch;
-            char dateStr[11];
-            strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &t);
-            auto fetchPeer = [&dateStr](const char* peerId, TokenData* peerData, const char* apikey, mealType meal) {
-                HTTPClient http;
-                String url = String(postURL) + "?sensor_id=eq." + peerId + "&date=eq." + peerData->date;
-                http.begin(url);
-                http.addHeader("apikey", apikey);
-                int code = http.GET();
-                Serial.printf("[PeerFetch] GET %s -> code %d\n", url.c_str(), code);
-                if (code == 200) {
-                    String payload = http.getString();
-                    JsonDocument doc;
-                    DeserializationError err = deserializeJson(doc, payload);
-                    if (!err && doc.is<JsonArray>() && doc.size() > 0) {
-                        JsonObject obj = doc[0];
-                        int mealCount = 0;
-                        if (meal == BREAKFAST) mealCount = obj["breakfast"] | 0;
-                        else if (meal == LUNCH) mealCount = obj["lunch"] | 0;
-                        else if (meal == DINNER) mealCount = obj["dinner"] | 0;
-                        peerData->token_count = mealCount;
-                        strncpy(peerData->date, obj["date"] | dateStr, sizeof(peerData->date));
-                        peerData->date[10] = '\0';
-                        peerData->meal = meal;
-                        Serial.printf("[PeerFetch] %s: meal=%d, count=%d, date=%s\n", peerId, (int)meal, mealCount, peerData->date);
-                    } else {
-                        Serial.printf("[PeerFetch] %s: JSON parse error or empty array\n", peerId);
-                    }
-                } else {
-                    Serial.printf("[PeerFetch] %s: HTTP GET failed\n", peerId);
-                }
-                http.end();
-            };
-                strncpy(token_data2.date, dateStr, sizeof(token_data2.date));
-                token_data2.date[10] = '\0';
-                fetchPeer(deviceId2, &token_data2, apikey, currentMeal);
-                strncpy(token_data3.date, dateStr, sizeof(token_data3.date));
-                token_data3.date[10] = '\0';
-                fetchPeer(deviceId3, &token_data3, apikey, currentMeal);
-          }
-        }
       // --- Bundle timeout: if bundle set and expired, reset to default ---
       if (g_bundleAdd > 0 && (millis() - g_bundleSetMs > 5000)) {
         g_bundleAdd = 0;
@@ -1777,6 +1769,7 @@ void fetchPeer(const char* peerId, TokenData* peerData, const char* apikey, meal
   String url = String(postURL) + "?sensor_id=eq." + peerId + "&date=eq." + dateStr;
   http.begin(url);
   http.addHeader("apikey", apikey);
+  http.setTimeout(1500);  // 1.5 seconds
   int code = http.GET();
   Serial.printf("[PeerFetch] GET %s -> code %d\n", url.c_str(), code);
   if (code == 200) {
@@ -1806,7 +1799,17 @@ void fetchPeer(const char* peerId, TokenData* peerData, const char* apikey, meal
 // --- Peer fetch FreeRTOS task ---
 void peerFetchTask(void* pv) {
   PeerFetchRequest req;
+  
   for (;;) {
+    static uint32_t lastPrint = 0;
+uint32_t now = millis();
+if (now - lastPrint > 2000) {
+  lastPrint = now;
+  Serial.printf("peerFetchTask HW=%u words (%u bytes)\n",
+                uxTaskGetStackHighWaterMark(NULL),
+                uxTaskGetStackHighWaterMark(NULL) * 4);
+}
+
     if (xQueueReceive(peerFetchQueue, &req, portMAX_DELAY) == pdTRUE) {
       fetchPeer(req.peerId, req.peerData, apikey, req.meal, req.dateStr);
     }
