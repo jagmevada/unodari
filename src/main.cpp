@@ -1425,9 +1425,38 @@ void drawScreen() {
   int16_t countWidth = u8g2.getStrWidth(buf);
   int16_t countX = (128 - countWidth) / 2;
   if (countX < 0) countX = 0;
-  int16_t countY = 64 - 6;
+  int16_t countY = 64 - 18; // move up to make space for small text
   u8g2.setCursor(countX, countY);
   u8g2.print(buf);
+
+  // Small counters line just below main counter
+  // For uno_1: show T:592 (left), M:596 (center), Σ:sum (right)
+  if (strcmp(deviceId, "uno_1") == 0) {
+    int tCount = 592;
+    int mCount = 596;
+    int sum = g_tokenCount + tCount + mCount;
+    // Small font
+    u8g2.setFont(u8g2_font_5x8_mf);
+    // T:xxx left
+    char tBuf[8];
+    snprintf(tBuf, sizeof(tBuf), "T:%d", tCount);
+    u8g2.setCursor(0, 64 - 2);
+    u8g2.print(tBuf);
+    // M:xxx center
+    char mBuf[8];
+    snprintf(mBuf, sizeof(mBuf), "M:%d", mCount);
+    int16_t mWidth = u8g2.getStrWidth(mBuf);
+    int16_t mX = (128 - mWidth) / 2;
+    u8g2.setCursor(mX, 64 - 2);
+    u8g2.print(mBuf);
+    // Σ:sum right
+    char sBuf[12];
+    snprintf(sBuf, sizeof(sBuf), "\xE2\x88\x91:%d", sum); // Unicode Sigma
+    int16_t sWidth = u8g2.getStrWidth(sBuf);
+    int16_t sX = 128 - sWidth;
+    u8g2.setCursor(sX, 64 - 2);
+    u8g2.print(sBuf);
+  }
 }
 
 // =============================
