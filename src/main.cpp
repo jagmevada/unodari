@@ -1368,6 +1368,27 @@ void drawWifi(uint8_t levelIndex) {
 }
 
 void drawScreen() {
+    // Show bundle mode (x10/x20/x30) at left-middle if active
+    if (g_bundleAdd > 0) {
+      static uint32_t lastBlinkMs = 0;
+      static bool blinkOn = true;
+      uint32_t nowMs = millis();
+      if (nowMs - lastBlinkMs >= 500) {
+        blinkOn = !blinkOn;
+        lastBlinkMs = nowMs;
+      }
+      if (blinkOn) {
+        char bundleStr[6];
+        snprintf(bundleStr, sizeof(bundleStr), "+%d", g_bundleAdd);
+        u8g2.setFont(u8g2_font_7x13_tf); // same as time, non-bold
+        int16_t bundleY = 36;
+        int16_t bundleWidth = u8g2.getStrWidth(bundleStr);
+        int16_t bundleX = 128 - bundleWidth - 1; // 1px margin from right
+        if (bundleX < 0) bundleX = 0; // safety: never negative
+        u8g2.setCursor(bundleX, bundleY);
+        u8g2.print(bundleStr);
+      }
+    }
   const int16_t x0 = 0;
   int16_t y = 14;
 
