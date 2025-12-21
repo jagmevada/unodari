@@ -1,3 +1,5 @@
+
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <U8g2lib.h>
@@ -29,6 +31,7 @@ enum TimeSource {
 TimeSource g_timeSource = TIME_NONE;
 bool g_timeValid = false;
 char g_timeErrorMsg[48] = "";
+
 
 
 /*
@@ -459,6 +462,16 @@ TokenData token_data = {0, NONE, "1970-01-01", false};
 TokenData token_data2 = {0, NONE, "1970-01-01", false};
 TokenData token_data3 = {0, NONE, "1970-01-01", false};
 Preferences prefs;
+
+// --- Peer fetch request struct and queue ---
+typedef struct {
+  char peerId[16];
+  char dateStr[12];
+  mealType meal;
+  TokenData* peerData;
+} PeerFetchRequest;
+
+QueueHandle_t peerFetchQueue = nullptr;
 // =============================
 // HTTP send queue + background task
 // =============================
@@ -509,8 +522,9 @@ static bool tryAcquireTimeFromNTP();
 
 // NEW: Sensor sampling task forward declaration
 void sensorTask(void *pv);
-
-
+void fetchPeer(const char* peerId, TokenData* peerData, const char* apikey, mealType meal, const char* dateStr);
+void peerFetchTask(void* pv);
+void fetchPeerDataIfNeeded();
 
 
 
@@ -1682,6 +1696,7 @@ void sensorTask(void *pv) {
       // Consider deadline miss if dt exceeds period + small margin (1ms)
       if (dt > (SENSOR_TASK_PERIOD_MS + 1)) {
         g_sensorDeadlineMisses++;
+
       }
     }
     prevMs = msNow;
@@ -1691,5 +1706,143 @@ void sensorTask(void *pv) {
 
     readSensors();
     vTaskDelayUntil(&lastWake, periodTicks);
+  }
+}
+
+// // NEW: Fetch peer data if needed (auto-fetch logic moved from loop())
+// void fetchPeerDataIfNeeded() {
+//     // Update currentMeal based on meal window logic
+//     time_t epoch = time(nullptr) + 19800; // IST offset +5:30
+//     struct tm t;
+//     gmtime_r(&epoch, &t);
+//     int hour = t.tm_hour;
+//     mealType newMeal = NONE;
+//     if (hour >= BFL && hour < BFH) newMeal = BREAKFAST;
+//     else if (hour >= LFL && hour <= LFH) newMeal = LUNCH;
+//     else if (hour >= DFL && hour <= DFH) newMeal = DINNER;
+//     else newMeal = NONE;
+//     currentMeal = newMeal;
+
+//     if (strcmp(deviceId, "uno_1") == 0 && WiFi.status() == WL_CONNECTED && currentMeal != NONE) {
+//         static uint32_t lastPeerFetch = 0;
+//         uint32_t nowFetch = millis();
+//         if (nowFetch - lastPeerFetch > 10000) { // fetch every 10s
+//             lastPeerFetch = nowFetch;
+//             char dateStr[11];
+//             strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &t);
+//             auto fetchPeer = [&dateStr](const char* peerId, TokenData* peerData, const char* apikey, mealType meal) {
+//                 HTTPClient http;
+//                 String url = String(postURL) + "?sensor_id=eq." + peerId + "&date=eq." + peerData->date;
+//                 http.begin(url);
+//                 http.addHeader("apikey", apikey);
+//                 int code = http.GET();
+//                 Serial.printf("[PeerFetch] GET %s -> code %d\n", url.c_str(), code);
+//                 if (code == 200) {
+//                     String payload = http.getString();
+//                     JsonDocument doc;
+//                     DeserializationError err = deserializeJson(doc, payload);
+//                     if (!err && doc.is<JsonArray>() && doc.size() > 0) {
+//                         JsonObject obj = doc[0];
+//                         int mealCount = 0;
+//                         if (meal == BREAKFAST) mealCount = obj["breakfast"] | 0;
+//                         else if (meal == LUNCH) mealCount = obj["lunch"] | 0;
+//                         else if (meal == DINNER) mealCount = obj["dinner"] | 0;
+//                         peerData->token_count = mealCount;
+//                         strncpy(peerData->date, obj["date"] | dateStr, sizeof(peerData->date));
+//                         peerData->date[10] = '\0';
+//                         peerData->meal = meal;
+//                         Serial.printf("[PeerFetch] %s: meal=%d, count=%d, date=%s\n", peerId, (int)meal, mealCount, peerData->date);
+//                     } else {
+//                         Serial.printf("[PeerFetch] %s: JSON parse error or empty array\n", peerId);
+//                     }
+//                 } else {
+//                     Serial.printf("[PeerFetch] %s: HTTP GET failed\n", peerId);
+//                 }
+//                 http.end();
+//             };
+//             strncpy(token_data2.date, dateStr, sizeof(token_data2.date));
+//             token_data2.date[10] = '\0';
+//             fetchPeer(deviceId2, &token_data2, apikey, currentMeal);
+//             strncpy(token_data3.date, dateStr, sizeof(token_data3.date));
+//             token_data3.date[10] = '\0';
+//             fetchPeer(deviceId3, &token_data3, apikey, currentMeal);
+//         }
+//     }
+// }
+
+
+// --- fetchPeer: file-scope, blocking, HTTP+JSON only ---
+void fetchPeer(const char* peerId, TokenData* peerData, const char* apikey, mealType meal, const char* dateStr) {
+  HTTPClient http;
+  String url = String(postURL) + "?sensor_id=eq." + peerId + "&date=eq." + dateStr;
+  http.begin(url);
+  http.addHeader("apikey", apikey);
+  int code = http.GET();
+  Serial.printf("[PeerFetch] GET %s -> code %d\n", url.c_str(), code);
+  if (code == 200) {
+    String payload = http.getString();
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (!err && doc.is<JsonArray>() && doc.size() > 0) {
+      JsonObject obj = doc[0];
+      int mealCount = 0;
+      if (meal == BREAKFAST) mealCount = obj["breakfast"] | 0;
+      else if (meal == LUNCH) mealCount = obj["lunch"] | 0;
+      else if (meal == DINNER) mealCount = obj["dinner"] | 0;
+      peerData->token_count = mealCount;
+      strncpy(peerData->date, obj["date"] | dateStr, sizeof(peerData->date));
+      peerData->date[10] = '\0';
+      peerData->meal = meal;
+      Serial.printf("[PeerFetch] %s: meal=%d, count=%d, date=%s\n", peerId, (int)meal, mealCount, peerData->date);
+    } else {
+      Serial.printf("[PeerFetch] %s: JSON parse error or empty array\n", peerId);
+    }
+  } else {
+    Serial.printf("[PeerFetch] %s: HTTP GET failed\n", peerId);
+  }
+  http.end();
+}
+
+// --- Peer fetch FreeRTOS task ---
+void peerFetchTask(void* pv) {
+  PeerFetchRequest req;
+  for (;;) {
+    if (xQueueReceive(peerFetchQueue, &req, portMAX_DELAY) == pdTRUE) {
+      fetchPeer(req.peerId, req.peerData, apikey, req.meal, req.dateStr);
+    }
+  }
+}
+
+// --- fetchPeerDataIfNeeded: scheduler only, no HTTP ---
+void fetchPeerDataIfNeeded() {
+  static uint32_t lastPeerFetch = 0;
+  uint32_t nowFetch = millis();
+  time_t epoch = time(nullptr) + 19800; // IST offset +5:30
+  struct tm t;
+  gmtime_r(&epoch, &t);
+  int hour = t.tm_hour;
+  mealType newMeal = NONE;
+  if (hour >= BFL && hour < BFH) newMeal = BREAKFAST;
+  else if (hour >= LFL && hour <= LFH) newMeal = LUNCH;
+  else if (hour >= DFL && hour <= DFH) newMeal = DINNER;
+  else newMeal = NONE;
+  currentMeal = newMeal;
+  if (strcmp(deviceId, "uno_1") == 0 && WiFi.status() == WL_CONNECTED && currentMeal != NONE) {
+    if (nowFetch - lastPeerFetch > 10000) { // 10s interval
+      lastPeerFetch = nowFetch;
+      char dateStr[11];
+      strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &t);
+      PeerFetchRequest req2, req3;
+      strncpy(req2.peerId, deviceId2, sizeof(req2.peerId));
+      strncpy(req2.dateStr, dateStr, sizeof(req2.dateStr));
+      req2.meal = currentMeal;
+      req2.peerData = &token_data2;
+      strncpy(req3.peerId, deviceId3, sizeof(req3.peerId));
+      strncpy(req3.dateStr, dateStr, sizeof(req3.dateStr));
+      req3.meal = currentMeal;
+      req3.peerData = &token_data3;
+      xQueueSend(peerFetchQueue, &req2, 0);
+      xQueueSend(peerFetchQueue, &req3, 0);
+    }
   }
 }
