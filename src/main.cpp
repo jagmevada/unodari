@@ -334,7 +334,7 @@ RTC_DS3231 rtc;
 #define COMBO_RESET_HOLD_MS    1000UL
 
 // Meal window macros (IST)
-#define BFL 5
+#define BFL 6
 #define BFH 9
 #define LFL 11
 #define LFH 14
@@ -853,6 +853,7 @@ void loop() {
         else if (hour >= DFL && hour <= DFH) newMeal = DINNER;
         else newMeal = NONE;
         currentMeal = newMeal;
+
       // --- Bundle timeout: if bundle set and expired, reset to default ---
       if (g_bundleAdd > 0 && (millis() - g_bundleSetMs > 5000)) {
         g_bundleAdd = 0;
@@ -1441,6 +1442,14 @@ void drawWifi(uint8_t levelIndex) {
 }
 
 void drawScreen() {
+      // Show meal indicator at extreme left (small font)
+      char mealChar = ' ';
+      if (currentMeal == BREAKFAST) mealChar = 'B';
+      else if (currentMeal == LUNCH) mealChar = 'L';
+      else if (currentMeal == DINNER) mealChar = 'D';
+      u8g2.setFont(u8g2_font_5x8_mf);
+      u8g2.setCursor(0, 36); // y=10, top left, small font
+      if (mealChar != ' ') u8g2.print(mealChar);
     // Show bundle mode (x10/x20/x30) at left-middle if active
     if (g_bundleAdd > 0) {
       static uint32_t lastBlinkMs = 0;
@@ -1498,7 +1507,7 @@ void drawScreen() {
   int16_t countWidth = u8g2.getStrWidth(buf);
   int16_t countX = (128 - countWidth) / 2;
   if (countX < 0) countX = 0;
-  int16_t countY = 64 - 18; // move up to make space for small text
+  int16_t countY = 64 - 15; // move up to make space for small text
   u8g2.setCursor(countX, countY);
   u8g2.print(buf);
 
