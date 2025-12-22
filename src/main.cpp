@@ -465,7 +465,7 @@ String g_timeString = "12:00 AM"; // TODO: backend should set real time here
 
 // Supabase backend config
 // Device ID macros for build-time selection
-// #define TIFFIN
+#define TIFFIN
 // #define MAHATMA
 #if defined(TIFFIN)
 #define DEVICE_ID   "uno_2"
@@ -942,18 +942,26 @@ void loop() {
     delay(20);  // small yield
     return;     // OK: we return, but we retry each loop
   }
- // Battery voltage update every 2 seconds
+  // Battery voltage update every 500ms, moving average of last 16 readings
   static uint32_t lastBattRead = 0;
-  if (millis() - lastBattRead > 2000) {
+  static float vBatReadings[16] = {0};
+  static int vBatIndex = 0;
+  static int vBatCount = 0;
+  if (millis() - lastBattRead > 500) {
     lastBattRead = millis();
-    vBat = readBatteryVoltage();
-    
+    float newReading = readBatteryVoltage();
+    vBatReadings[vBatIndex] = newReading;
+    vBatIndex = (vBatIndex + 1) % 16;
+    if (vBatCount < 16) vBatCount++;
+    float vBatSum = 0.0f;
+    for (int i = 0; i < vBatCount; ++i) vBatSum += vBatReadings[i];
+    vBat = vBatSum / vBatCount;
     checkChargerStatus();
     // Map voltage to battery level index (0..4)
     // 4.2V = 100%, 3.7V = 50%, 3.3V = 0%
-    if (vBat >= 3.4f) g_batteryLevelIndex = 4;
-    else if (vBat >= 3.2f) g_batteryLevelIndex = 3;
-    else if (vBat >= 3.0f) g_batteryLevelIndex = 2;
+    if (vBat >= 3.5f) g_batteryLevelIndex = 4;
+    else if (vBat >= 3.3f) g_batteryLevelIndex = 3;
+    else if (vBat >= 3.1f) g_batteryLevelIndex = 2;
     else if (vBat >= 2.8f) g_batteryLevelIndex = 1;
     else g_batteryLevelIndex = 0;
     Serial.printf("[Battery] Vbat=%.2fV, Level=%d\n", vBat, g_batteryLevelIndex);
@@ -1599,7 +1607,25 @@ void drawScreen() {
   u8g2.setCursor(x0, y);
   u8g2.print(titleChar);
 
-  drawBattery(g_batteryLevelIndex);
+  // Battery blink logic: blink when charging
+  static uint32_t lastBattBlinkMs = 0;
+  static bool battBlinkOn = true;
+  if (chargerState) {
+    uint32_t nowMs = millis();
+    if (nowMs - lastBattBlinkMs >= 500) {
+      battBlinkOn = !battBlinkOn;
+      lastBattBlinkMs = nowMs;
+    }
+    if (battBlinkOn) {
+      drawBattery(g_batteryLevelIndex);
+    }
+    // else: skip drawing battery (invisible)
+  } else {
+    // Not charging: always show battery, reset blink state
+    battBlinkOn = true;
+    lastBattBlinkMs = millis();
+    drawBattery(g_batteryLevelIndex);
+  }
   drawWifi(g_wifiLevelIndex);
 
   u8g2.setFont(u8g2_font_7x13B_tf);
