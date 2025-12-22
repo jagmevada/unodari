@@ -290,6 +290,31 @@ RTC_DS3231 rtc;
 // =============================
 // Pin Definitions
 // =============================
+// Charger detect pin
+#define CHARGER_DETECT_PIN 16
+boolean chargerState = false;
+void checkChargerStatus() {
+  chargerState = digitalRead(CHARGER_DETECT_PIN);
+  if (chargerState == HIGH) {
+    Serial.println("charging on");
+  } else {
+    Serial.println("charging off");
+  }
+}
+// Battery voltage sense pin (divider output)
+#define VBAT_SENSE_PIN 34
+#define VBAT_DIVIDER_RATIO 2.0f // 2x100K divider: Vbat/2 at pin
+#define VBAT_ADC_MAX 4095.0f
+#define VBAT_REF_VOLTAGE 3.3f // ESP32 ADC reference voltage
+float vBat = 0.0f;
+
+float readBatteryVoltage() {
+  int raw = analogRead(VBAT_SENSE_PIN);
+  float vSense = (raw / VBAT_ADC_MAX) * VBAT_REF_VOLTAGE;
+  float vBat = vSense * VBAT_DIVIDER_RATIO;
+  return vBat;
+}
+
 
 // Keypad (4 buttons)
 #define KEY1_PIN  5    // Button "1"
@@ -912,7 +937,23 @@ void loop() {
     delay(20);  // small yield
     return;     // OK: we return, but we retry each loop
   }
-
+ // Battery voltage update every 2 seconds
+  static uint32_t lastBattRead = 0;
+  if (millis() - lastBattRead > 2000) {
+    lastBattRead = millis();
+    vBat = readBatteryVoltage();
+    
+    checkChargerStatus();
+    // Map voltage to battery level index (0..4)
+    // 4.2V = 100%, 3.7V = 50%, 3.3V = 0%
+    if (vBat >= 4.1f) g_batteryLevelIndex = 4;
+    else if (vBat >= 3.95f) g_batteryLevelIndex = 3;
+    else if (vBat >= 3.8f) g_batteryLevelIndex = 2;
+    else if (vBat >= 3.5f) g_batteryLevelIndex = 1;
+    else g_batteryLevelIndex = 0;
+    Serial.printf("[Battery] Vbat=%.2fV, Level=%d\n", vBat, g_batteryLevelIndex);
+  }
+  // ...existing code...
 
 
 
@@ -1063,8 +1104,11 @@ void setupDisplay() {
 }
 
 void setupSensors() {
-  pinMode(S1_D0_PIN, INPUT);
-  pinMode(S2_D0_PIN, INPUT);
+    pinMode(CHARGER_DETECT_PIN, INPUT);
+    // Charger status check every 2 seconds
+
+  // pinMode(S1_D0_PIN, INPUT);
+  // pinMode(S2_D0_PIN, INPUT);
   // pinMode(S3_A0_PIN, INPUT); // NEW: Sensor 3 analog pin
   analogReadResolution(12);  // 0..4095 on ESP32
 }
