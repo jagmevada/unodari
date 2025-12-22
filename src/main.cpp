@@ -411,6 +411,11 @@ bool g_s3HighRegion = true;    // NEW: Sensor 3 Schmitt state
 int  g_tokenCount = 0;
 // One-shot bundle size for the next token event. 0 = normal +1.
 uint8_t g_bundleAdd = 0;
+// Bundle mode lock state: true = locked, false = unlocked
+bool g_bundleLocked = true;
+// For 2+3 hold detection
+static uint32_t g_bundleLockComboStartMs = 0;
+static bool g_bundleLockComboActive = false;
 // Timestamp when bundle was set (for timeout)
 uint32_t g_bundleSetMs = 0;
 
@@ -1277,6 +1282,9 @@ void handleKeypad() {
   static bool comboResetDone = false;
   static bool ignoreSinglesAfterCombo = false;
 
+  // Combo tracking for 2 + 3 (bundle lock/unlock)
+  static bool bundleLockComboDone = false;
+
   // --- Debounced PRESS events ---
   if (k1 && !k1Down && (nowMs - g_key1LastPressMs >= BUTTON_DEBOUNCE_MS)) {
     k1Down = true;
@@ -1317,39 +1325,78 @@ void handleKeypad() {
     }
   }
 
+  // --- Combo handling (Keys 2 + 3) for bundle lock/unlock ---
+  bool bundleLockBothDown = k2Down && k3Down;
+  if (bundleLockBothDown) {
+    if (!g_bundleLockComboActive) {
+      g_bundleLockComboActive = true;
+      g_bundleLockComboStartMs = (k2DownMs > k3DownMs) ? k2DownMs : k3DownMs;
+      bundleLockComboDone = false;
+      Serial.println("[Keypad] Combo 2+3 started");
+    }
+    if (!bundleLockComboDone && (nowMs - g_bundleLockComboStartMs >= 3000)) {
+      g_bundleLocked = !g_bundleLocked;
+      bundleLockComboDone = true;
+      g_lastKeyPressed = g_bundleLocked ? "Bundle LOCKED" : "Bundle UNLOCKED";
+      Serial.printf("Keys 2+3 held 3s -> Bundle %s\n", g_bundleLocked ? "LOCKED" : "UNLOCKED");
+    }
+  }
+
   // --- Debounced RELEASE events ---
+  // If combo ended (both not down), clear combo-related flags for 2+3
+  if (!k2Down && !k3Down) {
+    if (g_bundleLockComboActive || bundleLockComboDone) {
+      g_bundleLockComboActive = false;
+      bundleLockComboDone = false;
+      g_bundleLockComboStartMs = 0;
+    }
+  }
   bool k1Released = (!k1 && k1Down && (nowMs - g_key1LastPressMs >= BUTTON_DEBOUNCE_MS));
   bool k2Released = (!k2 && k2Down && (nowMs - g_key2LastPressMs >= BUTTON_DEBOUNCE_MS));
   bool k3Released = (!k3 && k3Down && (nowMs - g_key3LastPressMs >= BUTTON_DEBOUNCE_MS));
   bool k4Released = (!k4 && k4Down && (nowMs - g_key4LastPressMs >= BUTTON_DEBOUNCE_MS));
 
+
   if (k1Released) {
     k1Down = false;
     g_key1LastPressMs = nowMs;
-    if (!ignoreSinglesAfterCombo) {
+    if (!ignoreSinglesAfterCombo && !g_bundleLocked) {
       g_bundleAdd = 10; // single press Key 1 -> bundle +10
       g_bundleSetMs = nowMs;
       g_lastKeyPressed = "Key 1 Bundle +10";
       Serial.println("Key 1 single -> Next token = +10");
+    } else if (g_bundleLocked) {
+      g_lastKeyPressed = "Bundle LOCKED";
+      Serial.println("Key 1 ignored: bundle locked");
     }
   }
 
   if (k2Released) {
     k2Down = false;
     g_key2LastPressMs = nowMs;
-    g_bundleAdd = 20; // single press Key 2 -> bundle +20
-    g_bundleSetMs = nowMs;
-    g_lastKeyPressed = "Key 2 Bundle +20";
-    Serial.println("Key 2 single -> Next token = +20");
+    if (!g_bundleLocked) {
+      g_bundleAdd = 20; // single press Key 2 -> bundle +20
+      g_bundleSetMs = nowMs;
+      g_lastKeyPressed = "Key 2 Bundle +20";
+      Serial.println("Key 2 single -> Next token = +20");
+    } else {
+      g_lastKeyPressed = "Bundle LOCKED";
+      Serial.println("Key 2 ignored: bundle locked");
+    }
   }
 
   if (k3Released) {
     k3Down = false;
     g_key3LastPressMs = nowMs;
-    g_bundleAdd = 30; // single press Key 3 -> bundle +30
-    g_bundleSetMs = nowMs;
-    g_lastKeyPressed = "Key 3 Bundle +30";
-    Serial.println("Key 3 single -> Next token = +30");
+    if (!g_bundleLocked) {
+      g_bundleAdd = 30; // single press Key 3 -> bundle +30
+      g_bundleSetMs = nowMs;
+      g_lastKeyPressed = "Key 3 Bundle +30";
+      Serial.println("Key 3 single -> Next token = +30");
+    } else {
+      g_lastKeyPressed = "Bundle LOCKED";
+      Serial.println("Key 3 ignored: bundle locked");
+    }
   }
 
   if (k4Released) {
@@ -1530,6 +1577,16 @@ void drawScreen() {
         u8g2.setCursor(bundleX, bundleY);
         u8g2.print(bundleStr);
       }
+    }
+
+    // Draw bundle unlock symbol 'O' at middle extreme right, shifted up by 7 rows
+    int16_t symbolW = 10, symbolH = 10;
+    int16_t symbolX = 128 - symbolW - 1; // 1px from right
+    int16_t symbolY = 28 - 5; // shift up by 7 rows
+    if (!g_bundleLocked) {
+      u8g2.setFont(u8g2_font_10x20_tf);
+      u8g2.setCursor(symbolX, symbolY);
+      u8g2.print("o");
     }
   const int16_t x0 = 0;
   int16_t y = 14;
@@ -1921,7 +1978,7 @@ void fetchPeerDataIfNeeded() {
   gmtime_r(&epoch, &t);
   int hour = t.tm_hour;
   mealType newMeal = NONE;
-  if (hour >= BFL && hour < BFH) newMeal = BREAKFAST;
+  if (hour >= BFL && hour <= BFH) newMeal = BREAKFAST;
   else if (hour >= LFL && hour <= LFH) newMeal = LUNCH;
   else if (hour >= DFL && hour <= DFH) newMeal = DINNER;
   else newMeal = NONE;
