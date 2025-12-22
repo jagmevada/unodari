@@ -1591,7 +1591,7 @@ void wifiManagerTask(void *param) {
   WiFiManager wm;
   wm.setWiFiAutoReconnect(true);
   wm.setConfigPortalBlocking(false);
-  wm.setConfigPortalTimeout(120);
+  wm.setConfigPortalTimeout(0);
   wm.setConnectTimeout(15);
   wm.setConnectRetries(3);
   wm.setBreakAfterConfig(true);
@@ -1623,12 +1623,19 @@ void wifiManagerTask(void *param) {
     if (disconnectSince == 0) disconnectSince = millis();
 
     // Always keep trying to reconnect, even while portal is active
-    if (millis() - lastReconnectTry > 3000) {
-      lastReconnectTry = millis();
-      Serial.println("[WiFi] Reconnect attempt...");
-      WiFi.mode(WIFI_STA);
-      WiFi.reconnect(); // uses saved creds
-    }
+if (millis() - lastReconnectTry > 3000) {
+  lastReconnectTry = millis();
+  Serial.println("[WiFi] Reconnect attempt...");
+
+  // IMPORTANT: if portal is active, never drop AP mode
+  if (wm.getConfigPortalActive()) {
+    WiFi.mode(WIFI_AP_STA);     // keep portal alive
+  } else {
+    WiFi.mode(WIFI_STA);
+  }
+
+  WiFi.reconnect(); // uses saved creds
+}
 
     // Start portal after some time disconnected
     if (!wm.getConfigPortalActive() && (millis() - disconnectSince > 15000)) {
