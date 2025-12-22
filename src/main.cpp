@@ -434,9 +434,25 @@ uint8_t g_wifiLevelIndex = 4;     // TODO: backend should update based on WiFi s
 String g_timeString = "12:00 AM"; // TODO: backend should set real time here
 
 // Supabase backend config
-const char *deviceId = "uno_1"; // Change to uno_2 or uno_3 for other devices
-const char *deviceId2 = "uno_2";
-const char *deviceId3 = "uno_3";
+// Device ID macros for build-time selection
+// #define TIFFIN
+// #define MAHATMA
+#if defined(TIFFIN)
+#define DEVICE_ID   "uno_2"
+#define PEER1_ID    "uno_1"
+#define PEER2_ID    "uno_3"
+#elif defined(MAHATMA)
+#define DEVICE_ID   "uno_3"
+#define PEER1_ID    "uno_1"
+#define PEER2_ID    "uno_2"
+#else // Default: DARSHANARTHI
+#define DEVICE_ID   "uno_1"
+#define PEER1_ID    "uno_2"
+#define PEER2_ID    "uno_3"
+#endif
+const char *deviceId = DEVICE_ID;
+const char *deviceId2 = PEER1_ID;
+const char *deviceId3 = PEER2_ID;
 const char *postURL = "https://akxcjabakrvfaevdfwru.supabase.co/rest/v1/unodari_token";
 const char *apikey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFreGNqYWJha3J2ZmFldmRmd3J1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDkxMjMwMjUsImV4cCI6MjA2NDY5OTAyNX0.kykki4uVVgkSVU4lH-wcuGRdyu2xJ1CQkYFhQq_u08w";
 
@@ -1512,33 +1528,43 @@ void drawScreen() {
   u8g2.print(buf);
 
   // Small counters line just below main counter
-  // For uno_1: show T:<peer uno_2> (left), M:<peer uno_3> (center), Σ:sum (right) using real peer data for current meal
-  if (strcmp(deviceId, "uno_1") == 0) {
-    int tCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0;
-    int mCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0;
-    int sum = g_tokenCount + tCount + mCount;
-    // Small font
-    u8g2.setFont(u8g2_font_5x8_mf);
-    // T:xxx left
-    char tBuf[8];
-    snprintf(tBuf, sizeof(tBuf), "T:%d", tCount);
-    u8g2.setCursor(0, 64 - 2);
-    u8g2.print(tBuf);
-    // M:xxx center
-    char mBuf[8];
-    snprintf(mBuf, sizeof(mBuf), "M:%d", mCount);
-    int16_t mWidth = u8g2.getStrWidth(mBuf);
-    int16_t mX = (128 - mWidth) / 2;
-    u8g2.setCursor(mX, 64 - 2);
-    u8g2.print(mBuf);
-    // Σ:sum right
-    char sBuf[12];
-    snprintf(sBuf, sizeof(sBuf), "\xE2\x88\x91:%d", sum); // Unicode Sigma
-    int16_t sWidth = u8g2.getStrWidth(sBuf);
-    int16_t sX = 128 - sWidth;
-    u8g2.setCursor(sX, 64 - 2);
-    u8g2.print(sBuf);
+  // Show peer counters and sum, label based on device type
+  int leftCount = 0, centerCount = 0;
+  const char *leftLabel = "", *centerLabel = "";
+  if (strcmp(deviceId, "uno_1") == 0) { // Darshanarthi
+    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0; // Tiffin
+    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0; // Mahatma
+    leftLabel = "T"; centerLabel = "M";
+  } else if (strcmp(deviceId, "uno_2") == 0) { // Tiffin
+    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0; // Darshanarthi
+    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0; // Mahatma
+    leftLabel = "D"; centerLabel = "M";
+  } else if (strcmp(deviceId, "uno_3") == 0) { // Mahatma
+    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0; // Darshanarthi
+    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0; // Tiffin
+    leftLabel = "D"; centerLabel = "T";
   }
+  int sum = g_tokenCount + leftCount + centerCount;
+  u8g2.setFont(u8g2_font_5x8_mf);
+  // Left peer
+  char lBuf[10];
+  snprintf(lBuf, sizeof(lBuf), "%s:%d", leftLabel, leftCount);
+  u8g2.setCursor(0, 64 - 2);
+  u8g2.print(lBuf);
+  // Center peer
+  char cBuf[10];
+  snprintf(cBuf, sizeof(cBuf), "%s:%d", centerLabel, centerCount);
+  int16_t cWidth = u8g2.getStrWidth(cBuf);
+  int16_t cX = (128 - cWidth) / 2;
+  u8g2.setCursor(cX, 64 - 2);
+  u8g2.print(cBuf);
+  // Σ:sum right
+  char sBuf[12];
+  snprintf(sBuf, sizeof(sBuf), "\xE2\x88\x91:%d", sum); // Unicode Sigma
+  int16_t sWidth = u8g2.getStrWidth(sBuf);
+  int16_t sX = 128 - sWidth;
+  u8g2.setCursor(sX, 64 - 2);
+  u8g2.print(sBuf);
 }
 
 // =============================
@@ -1856,7 +1882,7 @@ void fetchPeerDataIfNeeded() {
   else if (hour >= DFL && hour <= DFH) newMeal = DINNER;
   else newMeal = NONE;
   currentMeal = newMeal;
-  if (strcmp(deviceId, "uno_1") == 0 && WiFi.status() == WL_CONNECTED && currentMeal != NONE) {
+  if (WiFi.status() == WL_CONNECTED && currentMeal != NONE) {
     if (nowFetch - lastPeerFetch > 10000) { // 10s interval
       lastPeerFetch = nowFetch;
       char dateStr[11];
