@@ -946,10 +946,10 @@ void loop() {
     checkChargerStatus();
     // Map voltage to battery level index (0..4)
     // 4.2V = 100%, 3.7V = 50%, 3.3V = 0%
-    if (vBat >= 4.1f) g_batteryLevelIndex = 4;
-    else if (vBat >= 3.95f) g_batteryLevelIndex = 3;
-    else if (vBat >= 3.8f) g_batteryLevelIndex = 2;
-    else if (vBat >= 3.5f) g_batteryLevelIndex = 1;
+    if (vBat >= 3.4f) g_batteryLevelIndex = 4;
+    else if (vBat >= 3.2f) g_batteryLevelIndex = 3;
+    else if (vBat >= 3.0f) g_batteryLevelIndex = 2;
+    else if (vBat >= 2.8f) g_batteryLevelIndex = 1;
     else g_batteryLevelIndex = 0;
     Serial.printf("[Battery] Vbat=%.2fV, Level=%d\n", vBat, g_batteryLevelIndex);
   }
