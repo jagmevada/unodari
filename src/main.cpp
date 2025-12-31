@@ -465,7 +465,7 @@ String g_timeString = "12:00 AM"; // TODO: backend should set real time here
 
 // Supabase backend config
 // Device ID macros for build-time selection
-#define TIFFIN
+// #define TIFFIN
 // #define MAHATMA
 #if defined(TIFFIN)
 #define DEVICE_ID   "uno_2"
@@ -959,11 +959,12 @@ void loop() {
     checkChargerStatus();
     // Map voltage to battery level index (0..4)
     // 4.2V = 100%, 3.7V = 50%, 3.3V = 0%
-    if (vBat >= 3.5f) g_batteryLevelIndex = 4;
-    else if (vBat >= 3.3f) g_batteryLevelIndex = 3;
-    else if (vBat >= 3.1f) g_batteryLevelIndex = 2;
+    if (vBat >= 3.65f) g_batteryLevelIndex = 4;
+    else if (vBat >= 3.35f) g_batteryLevelIndex = 3;
+    else if (vBat >= 3.05f) g_batteryLevelIndex = 2;
     else if (vBat >= 2.8f) g_batteryLevelIndex = 1;
     else g_batteryLevelIndex = 0;
+    g_batteryLevelIndex = 3;
     Serial.printf("[Battery] Vbat=%.2fV, Level=%d\n", vBat, g_batteryLevelIndex);
   }
   // ...existing code...
