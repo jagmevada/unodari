@@ -278,7 +278,26 @@ char g_timeErrorMsg[48] = "";
     global variables; the drawing functions are pure "view".
 */
 
-
+// Supabase backend config
+// Device ID macros for build-time selection
+// #define TIFFIN
+#define MAHATMA
+#if defined(TIFFIN)
+#define DEVICE_ID   "uno_2"
+#define PEER1_ID    "uno_1"
+#define PEER2_ID    "uno_3"
+#define DEVICE_CAL  1
+#elif defined(MAHATMA)
+#define DEVICE_ID   "uno_3"
+#define PEER1_ID    "uno_1"
+#define PEER2_ID    "uno_2"
+#define DEVICE_CAL  0.9797
+#else // Default: DARSHANARTHI
+#define DEVICE_ID   "uno_1"
+#define PEER1_ID    "uno_2"
+#define PEER2_ID    "uno_3"
+#define DEVICE_CAL  1
+#endif
 
 // =============================
 // RTC DS3231 on separate I2C bus (GPIO25=RTC_SDA, GPIO26=RTC_SCL)
@@ -295,23 +314,23 @@ RTC_DS3231 rtc;
 boolean chargerState = false;
 void checkChargerStatus() {
   chargerState = digitalRead(CHARGER_DETECT_PIN);
-  if (chargerState == HIGH) {
-    Serial.println("charging on");
-  } else {
-    Serial.println("charging off");
-  }
+  // if (chargerState == HIGH) {
+  //   Serial.println("charging on");
+  // } else {
+  //   Serial.println("charging off");
+  // }
 }
 // Battery voltage sense pin (divider output)
 #define VBAT_SENSE_PIN 34
 #define VBAT_DIVIDER_RATIO 2.0f // 2x100K divider: Vbat/2 at pin
 #define VBAT_ADC_MAX 4095.0f
-#define VBAT_REF_VOLTAGE 3.3f // ESP32 ADC reference voltage
+#define VBAT_REF_VOLTAGE 2.2f // ESP32 ADC reference voltage
 float vBat = 0.0f;
 
 float readBatteryVoltage() {
-  int raw = analogRead(VBAT_SENSE_PIN);
-  float vSense = (raw / VBAT_ADC_MAX) * VBAT_REF_VOLTAGE;
-  float vBat = vSense * VBAT_DIVIDER_RATIO;
+  vBat = analogReadMilliVolts(VBAT_SENSE_PIN)*VBAT_DIVIDER_RATIO/1000.0*DEVICE_CAL;
+  // uint32_t mv = analogReadMilliVolts(VBAT_SENSE_PIN);
+// Serial.printf("[ADC] Vsense=%lu mV, Vbat=%.3f V\n", mv, (mv*2.0)/1000.0);
   return vBat;
 }
 
@@ -349,7 +368,7 @@ float readBatteryVoltage() {
 
 // Analog sampling and Schmitt trigger thresholds for IR
 #define IR_SAMPLE_INTERVAL_MS  1UL    // sample analog inputs every 1ms
-#define IR_LTH                 400   // low threshold for Schmitt trigger
+#define IR_LTH                 2500   // low threshold for Schmitt trigger
 #define IR_HTH                 3000   // high threshold for Schmitt trigger
 
 // Time window for OR-ing between two sensors (ms)
@@ -463,23 +482,7 @@ uint8_t g_wifiLevelIndex = 4;     // TODO: backend should update based on WiFi s
 // Time string in "hh:mm AM/PM" format (to be updated by backend NTP/RTC code)
 String g_timeString = "12:00 AM"; // TODO: backend should set real time here
 
-// Supabase backend config
-// Device ID macros for build-time selection
-// #define TIFFIN
-// #define MAHATMA
-#if defined(TIFFIN)
-#define DEVICE_ID   "uno_2"
-#define PEER1_ID    "uno_1"
-#define PEER2_ID    "uno_3"
-#elif defined(MAHATMA)
-#define DEVICE_ID   "uno_3"
-#define PEER1_ID    "uno_1"
-#define PEER2_ID    "uno_2"
-#else // Default: DARSHANARTHI
-#define DEVICE_ID   "uno_1"
-#define PEER1_ID    "uno_2"
-#define PEER2_ID    "uno_3"
-#endif
+
 const char *deviceId = DEVICE_ID;
 const char *deviceId2 = PEER1_ID;
 const char *deviceId3 = PEER2_ID;
@@ -569,7 +572,7 @@ inline void setSystemTimeFromEpoch(time_t e);
 void wifiPortalTask(void *pv) ;
 void wifiManagerTask(void *param);
 static bool tryAcquireTimeFromNTP();
-
+static uint8_t batteryLevelFromVoltageHyst(float vBat, uint8_t curLevel) ;
 // NEW: Sensor sampling task forward declaration
 void sensorTask(void *pv);
 void fetchPeer(const char* peerId, TokenData* peerData, const char* apikey, mealType meal, const char* dateStr);
@@ -663,6 +666,17 @@ void processKey(uint8_t pin,
 // Setup
 // =============================
 
+
+static void showBootMessage(const char* line1, const char* line2 = nullptr) {
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_8x13B_tf);
+  u8g2.drawStr(0, 16, line1);
+  if (line2) u8g2.drawStr(0, 34, line2);
+  u8g2.sendBuffer();
+}
+
+
+
 void setup() {
     // --- Peer fetch queue and task ---
     if (peerFetchQueue == nullptr) {
@@ -682,7 +696,8 @@ void setup() {
 
   // 2. Initialize OLED display
   setupDisplay();
-
+showBootMessage("Powering ON...", "Please wait");
+delay(800);   // optional (0.5–1.0s feels good)
   // 3. Initialize IR sensors (pin modes, ADC)
   setupSensors();
 
@@ -848,6 +863,10 @@ if (ntpEpoch >= validThreshold) {
   );
 
   Serial.println("System initialized.");
+
+  analogReadResolution(12);                       // 0..4095
+  // analogSetPinAttenuation(VBAT_SENSE_PIN, ADC_6db);      // best for ~0..2.2V
+  analogSetPinAttenuation(VBAT_SENSE_PIN, ADC_11db);
 }
 
 // =============================
@@ -947,26 +966,25 @@ void loop() {
   static float vBatReadings[16] = {0};
   static int vBatIndex = 0;
   static int vBatCount = 0;
-  if (millis() - lastBattRead > 500) {
-    lastBattRead = millis();
-    float newReading = readBatteryVoltage();
-    vBatReadings[vBatIndex] = newReading;
-    vBatIndex = (vBatIndex + 1) % 16;
-    if (vBatCount < 16) vBatCount++;
-    float vBatSum = 0.0f;
-    for (int i = 0; i < vBatCount; ++i) vBatSum += vBatReadings[i];
-    vBat = vBatSum / vBatCount;
-    checkChargerStatus();
-    // Map voltage to battery level index (0..4)
-    // 4.2V = 100%, 3.7V = 50%, 3.3V = 0%
-    if (vBat >= 3.65f) g_batteryLevelIndex = 4;
-    else if (vBat >= 3.35f) g_batteryLevelIndex = 3;
-    else if (vBat >= 3.05f) g_batteryLevelIndex = 2;
-    else if (vBat >= 2.8f) g_batteryLevelIndex = 1;
-    else g_batteryLevelIndex = 0;
-    g_batteryLevelIndex = 3;
-    Serial.printf("[Battery] Vbat=%.2fV, Level=%d\n", vBat, g_batteryLevelIndex);
-  }
+if (millis() - lastBattRead > 500) {
+  lastBattRead = millis();
+
+  float newReading = readBatteryVoltage();
+  vBatReadings[vBatIndex] = newReading;
+  vBatIndex = (vBatIndex + 1) % 16;
+  if (vBatCount < 16) vBatCount++;
+
+  float vBatSum = 0.0f;
+  for (int i = 0; i < vBatCount; ++i) vBatSum += vBatReadings[i];
+  vBat = vBatSum / vBatCount;
+
+  checkChargerStatus();
+
+  g_batteryLevelIndex = batteryLevelFromVoltageHyst(vBat, g_batteryLevelIndex);
+
+  // Serial.printf("[Battery] Vbat=%.3fV, Level=%d\n", vBat, g_batteryLevelIndex);
+}
+
   // ...existing code...
 
 
@@ -2027,5 +2045,43 @@ void fetchPeerDataIfNeeded() {
       xQueueSend(peerFetchQueue, &req2, 0);
       xQueueSend(peerFetchQueue, &req3, 0);
     }
+  }
+}
+
+static uint8_t batteryLevelFromVoltageHyst(float vBat, uint8_t curLevel) {
+  const float H = 0.05f; // 50 mV hysteresis
+
+  // Your thresholds (edit these as you like)
+  const float T4 = 3.95f; // Level 4 boundary
+  const float T3 = 3.75f; // Level 3 boundary
+  const float T2 = 3.62f; // Level 2 boundary
+  const float T1 = 3.35f; // Level 1 boundary
+  const float T0 = 3.1f; // Level 0 / empty reference (optional)
+
+  // curLevel is 0..4
+  switch (curLevel) {
+    case 4:
+      if (vBat < (T4 - H)) return 3;
+      return 4;
+
+    case 3:
+      if (vBat >= (T4 + H)) return 4;
+      if (vBat <  (T3 - H)) return 2;
+      return 3;
+
+    case 2:
+      if (vBat >= (T3 + H)) return 3;
+      if (vBat <  (T2 - H)) return 1;
+      return 2;
+
+    case 1:
+      if (vBat >= (T2 + H)) return 2;
+      if (vBat <  (T1 - H)) return 0;
+      return 1;
+
+    case 0:
+    default:
+      if (vBat >= (T1 + H)) return 1;
+      return 0;
   }
 }
