@@ -280,13 +280,13 @@ char g_timeErrorMsg[48] = "";
 
 // Supabase backend config
 // Device ID macros for build-time selection
-// #define TIFFIN
-#define MAHATMA
+#define TIFFIN
+// #define MAHATMA
 #if defined(TIFFIN)
 #define DEVICE_ID   "uno_2"
 #define PEER1_ID    "uno_1"
 #define PEER2_ID    "uno_3"
-#define DEVICE_CAL  1
+#define DEVICE_CAL  0.985
 #elif defined(MAHATMA)
 #define DEVICE_ID   "uno_3"
 #define PEER1_ID    "uno_1"
@@ -296,7 +296,7 @@ char g_timeErrorMsg[48] = "";
 #define DEVICE_ID   "uno_1"
 #define PEER1_ID    "uno_2"
 #define PEER2_ID    "uno_3"
-#define DEVICE_CAL  1
+#define DEVICE_CAL  0.985
 #endif
 
 // =============================
@@ -697,7 +697,7 @@ void setup() {
   // 2. Initialize OLED display
   setupDisplay();
 showBootMessage("Powering ON...", "Please wait");
-delay(800);   // optional (0.5–1.0s feels good)
+delay(300);   // optional (0.5–1.0s feels good)
   // 3. Initialize IR sensors (pin modes, ADC)
   setupSensors();
 
