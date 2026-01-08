@@ -12,6 +12,14 @@
 #include <time.h>
 #include <RTClib.h>
 
+#ifndef STATIC_WIFI_SSID
+#define STATIC_WIFI_SSID "Unodari"
+#endif
+#ifndef STATIC_WIFI_PASS
+#define STATIC_WIFI_PASS "s1mandhar"
+#endif
+
+
 
 
 // =============================
@@ -365,6 +373,12 @@ float readBatteryVoltage() {
 
 // NEW: Deterministic sensor task period (ms)
 #define SENSOR_TASK_PERIOD_MS  5UL
+
+constexpr uint32_t WIFI_GRACE_PERIOD_MS      = 20000UL; // wait before opening portal
+constexpr uint32_t WIFI_RETRY_INTERVAL_MS    = 1500UL;  // spacing between attempt cycles
+constexpr uint32_t WIFI_MODE_RECHECK_MS      = 250UL;   // dwell time while connected
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS   = 1500UL;  // per-attempt timeout window
+
 
 // Analog sampling and Schmitt trigger thresholds for IR
 #define IR_SAMPLE_INTERVAL_MS  1UL    // sample analog inputs every 1ms
@@ -1767,77 +1781,212 @@ void wifiManagerTask(void *param) {
   String setupName = String(deviceId) + "_SETUP";
 
   WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
+  WiFi.setAutoReconnect(false);
 
   WiFiManager wm;
-  wm.setWiFiAutoReconnect(true);
+  wm.setWiFiAutoReconnect(false);
   wm.setConfigPortalBlocking(false);
   wm.setConfigPortalTimeout(0);
-  wm.setConnectTimeout(15);
-  wm.setConnectRetries(3);
+  wm.setConnectTimeout(2);
+  wm.setConnectRetries(1);
   wm.setBreakAfterConfig(true);
 
-  uint32_t disconnectSince = 0;
-  uint32_t lastReconnectTry = 0;
+  enum class WifiState {
+    Connected,
+    DisconnectedGrace,
+    PortalActive
+  };
 
-  for (;;) {
-    bool connected = (WiFi.status() == WL_CONNECTED);
+  WifiState state = (WiFi.status() == WL_CONNECTED) ? WifiState::Connected : WifiState::DisconnectedGrace;
 
-    if (connected) {
-      g_wifiLevelIndex = 4;
-      disconnectSince = 0;
+  uint32_t disconnectSince = (state == WifiState::Connected) ? 0 : millis();
+  uint32_t lastTry = 0;
+  uint32_t lastStaticTry = 0;
+  uint32_t lastSavedTry = 0;
+  bool preferStaticNext = true;
 
-      // Close any running portal once we have WiFi
-      if (wm.getConfigPortalActive()) {
-        wm.stopConfigPortal();
-        WiFi.mode(WIFI_STA);
-        g_portalRunning = false;
-        Serial.println("[WiFi] Connected -> portal stopped, STA-only");
-      }
-
-      vTaskDelay(pdMS_TO_TICKS(250));
-      continue;
-    }
-
-    // Not connected
-    g_wifiLevelIndex = 0;
-    if (disconnectSince == 0) disconnectSince = millis();
-
-    // Always keep trying to reconnect, even while portal is active
-if (millis() - lastReconnectTry > 3000) {
-  lastReconnectTry = millis();
-  Serial.println("[WiFi] Reconnect attempt...");
-
-  // IMPORTANT: if portal is active, never drop AP mode
-  if (wm.getConfigPortalActive()) {
-    WiFi.mode(WIFI_AP_STA);     // keep portal alive
-  } else {
-    WiFi.mode(WIFI_STA);
+  if (state != WifiState::Connected) {
+    uint32_t startStamp = millis();
+    lastTry = (startStamp > WIFI_RETRY_INTERVAL_MS) ? (startStamp - WIFI_RETRY_INTERVAL_MS) : 0;
   }
 
-  WiFi.reconnect(); // uses saved creds
-}
+  auto attemptStatic = [&](bool portalActive) -> bool {
+    Serial.println("[WiFi] Trying static credentials");
+    WiFi.mode(portalActive ? WIFI_AP_STA : WIFI_STA);
+    WiFi.begin(STATIC_WIFI_SSID, STATIC_WIFI_PASS);
+    uint32_t start = millis();
+    while (millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("[WiFi] Static credentials connected");
+        return true;
+      }
+      if (portalActive) {
+        wm.process();
+      }
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    WiFi.disconnect(false, false);
+    return false;
+  };
 
-    // Start portal after some time disconnected
-    if (!wm.getConfigPortalActive() && (millis() - disconnectSince > 15000)) {
-      Serial.println("[WiFi] Disconnected -> starting portal...");
-      WiFi.mode(WIFI_AP_STA);
-      wm.startConfigPortal(setupName.c_str()); // non-blocking because blocking=false
-      g_portalRunning = true;
+  auto attemptSaved = [&](bool portalActive) -> bool {
+    Serial.println("[WiFi] Trying saved credentials");
+    WiFi.mode(portalActive ? WIFI_AP_STA : WIFI_STA);
+    WiFi.begin();
+    uint32_t start = millis();
+    while (millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("[WiFi] Saved credentials connected");
+        return true;
+      }
+      if (portalActive) {
+        wm.process();
+      }
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    WiFi.disconnect(false, false);
+    return false;
+  };
+
+  auto performAttempts = [&](bool portalActive) -> bool {
+    bool madeAttempt = false;
+
+    auto tryStatic = [&](void) -> bool {
+      uint32_t nowStamp = millis();
+      if ((nowStamp - lastStaticTry) < WIFI_RETRY_INTERVAL_MS) {
+        return false;
+      }
+      madeAttempt = true;
+      lastStaticTry = nowStamp;
+      bool ok = attemptStatic(portalActive);
+      lastStaticTry = millis();
+      preferStaticNext = false;
+      return ok;
+    };
+
+    auto trySaved = [&](void) -> bool {
+      uint32_t nowStamp = millis();
+      if ((nowStamp - lastSavedTry) < WIFI_RETRY_INTERVAL_MS) {
+        return false;
+      }
+      madeAttempt = true;
+      lastSavedTry = nowStamp;
+      bool ok = attemptSaved(portalActive);
+      lastSavedTry = millis();
+      preferStaticNext = true;
+      return ok;
+    };
+
+    if (preferStaticNext) {
+      if (tryStatic()) return true;
+      if (trySaved()) return true;
+    } else {
+      if (trySaved()) return true;
+      if (tryStatic()) return true;
     }
 
-    // Process portal if running; if STA gets IP during portal, close it
-    if (wm.getConfigPortalActive()) {
-      wm.process();
-      if (WiFi.status() == WL_CONNECTED) {
+    if (!madeAttempt) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    return false;
+  };
+
+  for (;;) {
+    uint32_t nowMs = millis();
+    bool connected = (WiFi.status() == WL_CONNECTED);
+    bool portalActive = wm.getConfigPortalActive();
+
+    if (portalActive != g_portalRunning) {
+      g_portalRunning = portalActive;
+    }
+
+    if (connected) {
+      if (state != WifiState::Connected) {
+        Serial.println("[WiFi] Connected -> switching to STA mode");
+      }
+      state = WifiState::Connected;
+      disconnectSince = 0;
+      g_wifiLevelIndex = 4;
+
+      if (portalActive) {
         wm.stopConfigPortal();
+        WiFi.softAPdisconnect(true);
         WiFi.mode(WIFI_STA);
         g_portalRunning = false;
-        Serial.println("[WiFi] Connected during portal -> portal stopped");
+        Serial.println("[WiFi] Portal closed after connection");
+      }
+    } else {
+      g_wifiLevelIndex = 0;
+      if (state == WifiState::Connected) {
+        disconnectSince = nowMs;
+        state = WifiState::DisconnectedGrace;
+        lastTry = (nowMs > WIFI_RETRY_INTERVAL_MS) ? (nowMs - WIFI_RETRY_INTERVAL_MS) : 0;
+        lastStaticTry = 0;
+        lastSavedTry = 0;
+        Serial.println("[WiFi] Disconnected -> grace window");
       }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(50));
+    switch (state) {
+      case WifiState::Connected:
+        WiFi.mode(WIFI_STA);
+        vTaskDelay(pdMS_TO_TICKS(WIFI_MODE_RECHECK_MS));
+        break;
+
+      case WifiState::DisconnectedGrace: {
+        if (disconnectSince == 0) {
+          disconnectSince = nowMs;
+        }
+
+        if ((nowMs - lastTry) >= WIFI_RETRY_INTERVAL_MS) {
+          lastTry = nowMs;
+          if (performAttempts(false)) {
+            continue;
+          }
+          lastTry = millis();
+        }
+
+        if ((nowMs - disconnectSince) >= WIFI_GRACE_PERIOD_MS) {
+          if (!portalActive) {
+            Serial.println("[WiFi] Grace expired -> starting portal");
+            WiFi.mode(WIFI_AP_STA);
+            wm.startConfigPortal(setupName.c_str());
+            portalActive = wm.getConfigPortalActive();
+            g_portalRunning = portalActive;
+          }
+          if (portalActive) {
+            state = WifiState::PortalActive;
+          }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+        break;
+      }
+
+      case WifiState::PortalActive: {
+        WiFi.mode(WIFI_AP_STA);
+        wm.process();
+
+        if ((nowMs - lastTry) >= WIFI_RETRY_INTERVAL_MS) {
+          lastTry = nowMs;
+          if (performAttempts(true)) {
+            continue;
+          }
+          lastTry = millis();
+        }
+
+        if (!wm.getConfigPortalActive()) {
+          g_portalRunning = false;
+          state = WifiState::DisconnectedGrace;
+          uint32_t stamp = millis();
+          disconnectSince = stamp;
+          lastTry = (stamp > WIFI_RETRY_INTERVAL_MS) ? (stamp - WIFI_RETRY_INTERVAL_MS) : 0;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+        break;
+      }
+    }
   }
 }
 
