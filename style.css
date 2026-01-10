@@ -86,7 +86,7 @@ h2 {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin: 8px 14px;
+    margin: 8px 0px;
     border-radius: 8px;
     transition: all 0.3s ease;
 }
@@ -193,7 +193,7 @@ h2 {
     }
     
     .card {
-        padding: 20px;
+        padding: 10px;
     }
 }
 
