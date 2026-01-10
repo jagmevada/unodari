@@ -202,3 +202,33 @@ h2 {
     justify-content: end;
     color: grey;
 }
+
+/* Inline inputs */
+.inline-input {
+    width: 60px;
+    padding: 5px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 1em;
+    text-align: center;
+}
+
+.inline-btn {
+    padding: 5px 10px;
+    background-color: #667eea;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9em;
+    transition: background 0.3s;
+}
+
+.inline-btn:hover {
+    background-color: #764ba2;
+}
+
+/* Ensure row items are aligned */
+.row {
+    gap: 10px;
+}

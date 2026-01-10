@@ -76,22 +76,46 @@ async function loadData() {
 
         if (error || !data) continue;
 
-        const { breakfast, lunch, dinner, total, timestamp } = data;
+        const { 
+            breakfast_total, lunch_total, dinner_total, 
+            breakfast_manual, lunch_manual, dinner_manual, 
+            timestamp 
+        } = data;
 
-        // Organize by meal type
-        mealData.breakfast.devices[sensor] = breakfast;
-        mealData.breakfast.total += breakfast;
+        // Populate manual inputs
+        const meals = [
+            { name: 'breakfast', value: breakfast_manual },
+            { name: 'lunch', value: lunch_manual },
+            { name: 'dinner', value: dinner_manual }
+        ];
+
+        meals.forEach(m => {
+            const input = document.querySelector(`.inline-input[data-device="${sensor}"][data-meal="${m.name}"]`);
+            if (input) {
+                // Only set if not currently focused to avoid overwriting user typing (basic safeguard)
+                // However, usually these auto-refresh, so might be annoying. 
+                // Given the requirement is "filled in", we set it.
+                if (document.activeElement !== input) {
+                    input.value = m.value || ''; 
+                }
+            }
+        });
+
+        // Organize by meal type (using Total columns which include Manual + Auto)
+        mealData.breakfast.devices[sensor] = breakfast_total || 0;
+        mealData.breakfast.total += (breakfast_total || 0);
         mealData.breakfast.timestamp = timestamp;
 
-        mealData.lunch.devices[sensor] = lunch;
-        mealData.lunch.total += lunch;
+        mealData.lunch.devices[sensor] = lunch_total || 0;
+        mealData.lunch.total += (lunch_total || 0);
         mealData.lunch.timestamp = timestamp;
 
-        mealData.dinner.devices[sensor] = dinner;
-        mealData.dinner.total += dinner;
+        mealData.dinner.devices[sensor] = dinner_total || 0;
+        mealData.dinner.total += (dinner_total || 0);
         mealData.dinner.timestamp = timestamp;
 
-        grandTotal += total;
+        // Calculate grand total from the fetched totals
+        grandTotal += (breakfast_total || 0) + (lunch_total || 0) + (dinner_total || 0);
     }
 
     // Update meal cards with device counts
@@ -174,3 +198,62 @@ setInterval(loadData, 10000);
 
 // Update highlight every minute to catch time changes
 setInterval(highlightActiveMeal, 60000);
+
+
+// Function to send individual manual data to Supabase
+async function sendIndividualData(meal, device) {
+    const input = document.querySelector(`.inline-input[data-meal="${meal}"][data-device="${device}"]`);
+    const btn = document.querySelector(`button[onclick="sendIndividualData('${meal}', '${device}')"]`);
+    
+    if (!input || !input.value) {
+        alert("Please enter a value.");
+        return;
+    }
+
+    const value = parseInt(input.value, 10);
+    if (isNaN(value)) {
+        alert("Please enter a valid number.");
+        return;
+    }
+
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const today = `${year}-${month}-${day}`;
+
+    // Disable button to prevent double clicks
+    if (btn) {
+        btn.disabled = true;
+        btn.innerText = "...";
+    }
+
+    const updateObj = {};
+    updateObj[`${meal}_manual`] = value;
+
+    try {
+        const { error } = await supabaseClient
+            .from("unodari_token")
+            .update(updateObj)
+            .eq("sensor_id", device)
+            .eq("date", today);
+
+        if (error) throw error;
+
+        // alert("Added successfully!");
+        input.value = ''; // Clear input
+
+        // Refresh data
+        loadData();
+
+    } catch (err) {
+        console.error("Error updating manual data:", err);
+        alert("Failed to update data.");
+    } finally {
+         if (btn) {
+            btn.disabled = false;
+            btn.innerText = "Add";
+        }
+    }
+}
+
