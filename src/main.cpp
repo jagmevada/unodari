@@ -347,7 +347,6 @@ float readBatteryVoltage() {
 #define S1_A0_PIN 32   // Analog (used for counting)
 
 // TCRT5000 Sensor 2
-#define S2_D0_PIN 16   // Digital (not used for counting)
 #define S2_A0_PIN 33   // Analog (used for counting)
 
 // TCRT5000 Sensor 3 (NEW)
@@ -402,12 +401,25 @@ float readBatteryVoltage() {
 
 #define TIME_SYNC_DATA_INTERVAL_MS 10000UL // 10 seconds
 
+// =============================
+// Static WiFi fallback networks (2 SSIDs)
+// =============================
+#define STATIC_SSID1   "Unodari"
+#define STATIC_PASS1   "s1mandhar"
+
+#define STATIC_SSID2   "Unodari.123"
+#define STATIC_PASS2   "dadaniruma"
+
+
 // India Standard Time offset from UTC in seconds (+5:30)
 static const long IST_OFFSET_SECONDS = 5 * 3600 + 30 * 60;
 volatile unsigned long now=0; // current time in loop
 // volatile unsigned long lastWiFiCheck = 0;
 volatile unsigned long lastEEPROMWrite = 0;
 volatile unsigned long lastSensorSend = 0;
+
+
+
 // =============================
 // Global State
 // =============================
@@ -578,7 +590,7 @@ void sensorTask(void *pv);
 void fetchPeer(const char* peerId, TokenData* peerData, const char* apikey, mealType meal, const char* dateStr);
 void peerFetchTask(void* pv);
 void fetchPeerDataIfNeeded();
-
+static void tryStaticNetworksNoScan(uint32_t nowMs);
 
 
 void httpSenderTask(void *pvParameters) ;
@@ -1768,6 +1780,9 @@ void wifiManagerTask(void *param) {
 
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
+WiFi.mode(WIFI_STA);
+WiFi.setAutoReconnect(true);
+WiFi.setSleep(false);   // IMPORTANT: improves scan/connect stability
 
   WiFiManager wm;
   wm.setWiFiAutoReconnect(true);
@@ -1808,15 +1823,22 @@ if (millis() - lastReconnectTry > 3000) {
   lastReconnectTry = millis();
   Serial.println("[WiFi] Reconnect attempt...");
 
-  // IMPORTANT: if portal is active, never drop AP mode
+  // Keep portal alive if it is active
   if (wm.getConfigPortalActive()) {
-    WiFi.mode(WIFI_AP_STA);     // keep portal alive
+    WiFi.mode(WIFI_AP_STA);
   } else {
     WiFi.mode(WIFI_STA);
   }
 
-  WiFi.reconnect(); // uses saved creds
+  // 1) Try saved credentials (WM stored)
+  WiFi.reconnect();
+
+  // 2) Also try static SSIDs periodically (NO SCAN, so WM scan stays OK)
+  if (WiFi.status() != WL_CONNECTED) {
+    tryStaticNetworksNoScan(millis());
+  }
 }
+
 
     // Start portal after some time disconnected
     if (!wm.getConfigPortalActive() && (millis() - disconnectSince > 15000)) {
@@ -2084,4 +2106,27 @@ static uint8_t batteryLevelFromVoltageHyst(float vBat, uint8_t curLevel) {
       if (vBat >= (T1 + H)) return 1;
       return 0;
   }
+}
+
+
+
+// =============================
+// Static WiFi connect helper (NO SCAN -> avoids WM scan collisions)
+// =============================
+static void tryStaticNetworksNoScan(uint32_t nowMs) {
+  static uint32_t lastAttemptMs = 0;
+  static uint8_t which = 0;
+
+  // attempt every 6 seconds (not too aggressive)
+  if (nowMs - lastAttemptMs < 6000) return;
+  lastAttemptMs = nowMs;
+
+  const char* ssid = (which == 0) ? STATIC_SSID1 : STATIC_SSID2;
+  const char* pass = (which == 0) ? STATIC_PASS1 : STATIC_PASS2;
+  which = (which + 1) % 2;
+
+  if (!ssid || !ssid[0]) return;
+
+  Serial.printf("[WiFi] Trying static SSID (no-scan): %s\n", ssid);
+  WiFi.begin(ssid, pass);
 }
