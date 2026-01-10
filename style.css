@@ -267,3 +267,31 @@ h2 {
 .row.active .device-auto {
     color: #ddd;
 }
+
+.row.header {
+    margin-bottom: 5px;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 5px;
+}
+
+.row.header span {
+    font-weight: 700;
+    color: #667eea;
+    font-size: 0.9em;
+}
+
+/* Alignment helpers */
+.right-text {
+    text-align: right !important;
+    justify-self: end;
+}
+
+.center-text {
+    text-align: center !important;
+    justify-self: center;
+}
+
+.row .meal-total {
+    text-align: right;
+    justify-self: end;
+}
