@@ -230,7 +230,26 @@ h2 {
 
 /* Ensure row items are aligned */
 .row {
+    display: grid;
+    grid-template-columns: 1.5fr 70px auto 1fr 1fr;
+    align-items: center;
     gap: 10px;
+}
+
+.row span {
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.row .inline-input {
+    width: 100%; /* Fill grid cell */
+}
+
+.device-auto, .device-total, .meal-total {
+    text-align: right; /* Align numbers to right */
+    justify-self: end;
 }
 
 .device-auto {
