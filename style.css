@@ -232,3 +232,19 @@ h2 {
 .row {
     gap: 10px;
 }
+
+.device-auto {
+    color: #999;
+    font-size: 1.1em;
+    font-weight: 600;
+}
+
+.device-total {
+    color: #667eea;
+    font-size: 1.3em;
+    font-weight: 700;
+}
+
+.row.active .device-auto {
+    color: #ddd;
+}

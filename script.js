@@ -49,9 +49,9 @@ function highlightActiveMeal() {
 // Main function to load all data
 async function loadData() {
     const mealData = {
-        breakfast: { devices: {}, total: 0, timestamp: '' },
-        lunch: { devices: {}, total: 0, timestamp: '' },
-        dinner: { devices: {}, total: 0, timestamp: '' }
+        breakfast: { devices: {}, auto: {}, total: 0, timestamp: '' },
+        lunch: { devices: {}, auto: {}, total: 0, timestamp: '' },
+        dinner: { devices: {}, auto: {}, total: 0, timestamp: '' }
     };
     reorderMealCards();
     let grandTotal = 0;
@@ -77,6 +77,7 @@ async function loadData() {
         if (error || !data) continue;
 
         const { 
+            breakfast, lunch, dinner, // Auto columns
             breakfast_total, lunch_total, dinner_total, 
             breakfast_manual, lunch_manual, dinner_manual, 
             timestamp 
@@ -92,29 +93,29 @@ async function loadData() {
         meals.forEach(m => {
             const input = document.querySelector(`.inline-input[data-device="${sensor}"][data-meal="${m.name}"]`);
             if (input) {
-                // Only set if not currently focused to avoid overwriting user typing (basic safeguard)
-                // However, usually these auto-refresh, so might be annoying. 
-                // Given the requirement is "filled in", we set it.
                 if (document.activeElement !== input) {
                     input.value = m.value || ''; 
                 }
             }
         });
 
-        // Organize by meal type (using Total columns which include Manual + Auto)
+        // Organize by meal type (Total)
         mealData.breakfast.devices[sensor] = breakfast_total || 0;
+        mealData.breakfast.auto[sensor] = breakfast || 0; // Store Auto
         mealData.breakfast.total += (breakfast_total || 0);
         mealData.breakfast.timestamp = timestamp;
 
         mealData.lunch.devices[sensor] = lunch_total || 0;
+        mealData.lunch.auto[sensor] = lunch || 0;
         mealData.lunch.total += (lunch_total || 0);
         mealData.lunch.timestamp = timestamp;
 
         mealData.dinner.devices[sensor] = dinner_total || 0;
+        mealData.dinner.auto[sensor] = dinner || 0;
         mealData.dinner.total += (dinner_total || 0);
         mealData.dinner.timestamp = timestamp;
 
-        // Calculate grand total from the fetched totals
+        // Calculate grand total
         grandTotal += (breakfast_total || 0) + (lunch_total || 0) + (dinner_total || 0);
     }
 
@@ -124,9 +125,16 @@ async function loadData() {
         
         // Update individual device counts
         for (const device of devices) {
-            const count = mealInfo.devices[device] || 0;
-            const element = document.querySelector(`b.device-count[data-device="${device}"][data-meal="${meal}"]`);
-            if (element) element.innerText = count;
+            const totalCount = mealInfo.devices[device] || 0;
+            const autoCount = mealInfo.auto[device] || 0;
+
+            // Update Total
+            const totalEl = document.querySelector(`b.device-total[data-device="${device}"][data-meal="${meal}"]`);
+            if (totalEl) totalEl.innerText = totalCount;
+
+            // Update Auto
+            const autoEl = document.querySelector(`b.device-auto[data-device="${device}"][data-meal="${meal}"]`);
+            if (autoEl) autoEl.innerText = autoCount;
         }
 
         // Update meal total
