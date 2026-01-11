@@ -609,6 +609,8 @@ void getCurrentISTTime(struct tm* t);
 mealType getMealWindowFromHour(int hour);
 void getCurrentDateStr(char* dateStr, size_t len);
 mealType getCurrentMealWindow();
+// WiFi signal helper
+uint8_t getWifiLevelFromRSSI(long rssi);
 // Meal window reset logic
 void checkMealWindowReset();
 void resetTokenCounter(const char* reason, bool forceUpdateNVS);
@@ -938,17 +940,7 @@ void loop() {
 
           fetchPeerDataIfNeeded();
         // --- Update currentMeal based on meal window logic ---
-        int hour = 0;
-        time_t epoch = time(nullptr) + 19800; // IST offset +5:30
-        struct tm t;
-        gmtime_r(&epoch, &t);
-        hour = t.tm_hour;
-        mealType newMeal = NONE;
-        if (hour >= BFL && hour < BFH) newMeal = BREAKFAST;
-        else if (hour >= LFL && hour <= LFH) newMeal = LUNCH;
-        else if (hour >= DFL && hour <= DFH) newMeal = DINNER;
-        else newMeal = NONE;
-        currentMeal = newMeal;
+        currentMeal = getCurrentMealWindow();
 
       // --- Bundle timeout: if bundle set and expired, reset to default ---
       if (g_bundleAdd > 0 && (millis() - g_bundleSetMs > 5000)) {
@@ -956,13 +948,7 @@ void loop() {
       }
     // --- Update WiFi signal strength bar (g_wifiLevelIndex) based on RSSI ---
     if (WiFi.status() == WL_CONNECTED) {
-      long rssi = WiFi.RSSI();
-      // Map RSSI to 4 bars: 0 = no network, 1 = weak, 2 = fair, 3 = good, 4 = excellent
-      if (rssi >= -55) g_wifiLevelIndex = 4;         // Excellent
-      else if (rssi >= -65) g_wifiLevelIndex = 3;    // Good
-      else if (rssi >= -75) g_wifiLevelIndex = 2;    // Fair
-      else if (rssi >= -85) g_wifiLevelIndex = 1;    // Weak
-      else g_wifiLevelIndex = 0;                     // No/very poor signal
+      g_wifiLevelIndex = getWifiLevelFromRSSI(WiFi.RSSI());
     } else {
       g_wifiLevelIndex = 0; // Not connected
     }
@@ -1072,12 +1058,12 @@ if (millis() - lastBattRead > 500) {
 
 
   // --- Normal operation: valid time source ---
-  // Get IST time for meal logic and display
-
-  time_t epochLocal = epoch ;//+ IST_OFFSET_SECONDS;
-  gmtime_r(&epochLocal, &t);
+  // Get IST time for meal logic and display using helper functions
+  struct tm t;
+  getCurrentISTTime(&t);
+  
   char dateStr[11];
-  strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &t);
+  getCurrentDateStr(dateStr, sizeof(dateStr));
  
   strncpy(token_data.date, dateStr, sizeof(token_data.date));
   token_data.date[10] = '\0';
@@ -1091,11 +1077,8 @@ if (millis() - lastBattRead > 500) {
   snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d %s", displayHour, t.tm_min, isPM ? "PM" : "AM");
   g_timeString = String(timeBuf);
 
-  // Determine meal window and check for reset
-  mealType currentMealWindow = NONE;
-  if (hour >= BFL && hour < BFH) currentMealWindow = BREAKFAST;
-  else if (hour >= LFL && hour <= LFH) currentMealWindow = LUNCH;
-  else if (hour >= DFL && hour <= DFH) currentMealWindow = DINNER;
+  // Determine meal window and check for reset using helper functions
+  mealType currentMealWindow = getMealWindowFromHour(t.tm_hour);
   
   // Check for meal window reset (first boot or meal transition)
   checkMealWindowReset();
@@ -2224,13 +2207,7 @@ void wifiConnectTask(void *pv) {
     
     if (connected) {
       // Update WiFi signal strength indicator
-      long rssi = WiFi.RSSI();
-      if (rssi >= -55) g_wifiLevelIndex = 4;
-      else if (rssi >= -65) g_wifiLevelIndex = 3;
-      else if (rssi >= -75) g_wifiLevelIndex = 2;
-      else if (rssi >= -85) g_wifiLevelIndex = 1;
-      else g_wifiLevelIndex = 0;
-      
+      g_wifiLevelIndex = getWifiLevelFromRSSI(WiFi.RSSI());
       vTaskDelay(pdMS_TO_TICKS(500));
       continue;
     }
@@ -2453,21 +2430,12 @@ if (now - lastPrint > 2000) {
 void fetchPeerDataIfNeeded() {
   static uint32_t lastPeerFetch = 0;
   uint32_t nowFetch = millis();
-  time_t epoch = time(nullptr) + 19800; // IST offset +5:30
-  struct tm t;
-  gmtime_r(&epoch, &t);
-  int hour = t.tm_hour;
-  mealType newMeal = NONE;
-  if (hour >= BFL && hour <= BFH) newMeal = BREAKFAST;
-  else if (hour >= LFL && hour <= LFH) newMeal = LUNCH;
-  else if (hour >= DFL && hour <= DFH) newMeal = DINNER;
-  else newMeal = NONE;
-  currentMeal = newMeal;
+  currentMeal = getCurrentMealWindow();
   if (WiFi.status() == WL_CONNECTED && currentMeal != NONE) {
     if (nowFetch - lastPeerFetch > 10000) { // 10s interval
       lastPeerFetch = nowFetch;
       char dateStr[11];
-      strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &t);
+      getCurrentDateStr(dateStr, sizeof(dateStr));
       PeerFetchRequest req2, req3;
       strncpy(req2.peerId, deviceId2, sizeof(req2.peerId));
       strncpy(req2.dateStr, dateStr, sizeof(req2.dateStr));
@@ -2551,6 +2519,15 @@ mealType getCurrentMealWindow() {
   struct tm t;
   getCurrentISTTime(&t);
   return getMealWindowFromHour(t.tm_hour);
+}
+
+// Map RSSI to WiFi level (0-4 bars)
+uint8_t getWifiLevelFromRSSI(long rssi) {
+  if (rssi >= -55) return 4;         // Excellent
+  else if (rssi >= -65) return 3;    // Good
+  else if (rssi >= -75) return 2;    // Fair
+  else if (rssi >= -85) return 1;    // Weak
+  return 0;                          // No/very poor signal
 }
 
 // =============================
