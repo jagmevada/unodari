@@ -4,8 +4,9 @@
 #include <Wire.h>
 #include <U8g2lib.h>
 
-#include <WiFiManager.h>
 #include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -410,6 +411,18 @@ float readBatteryVoltage() {
 #define STATIC_SSID2   "Unodari.123"
 #define STATIC_PASS2   "dadaniruma"
 
+// Custom SSID stored in Preferences (3rd network option)
+char g_customSSID[33] = "";
+char g_customPass[65] = "";
+
+// WiFi Portal state
+static bool g_portalActive = false;
+static bool g_portalStopRequested = false;  // Flag to request stop from handler
+static WebServer* g_portalServer = nullptr;
+static DNSServer* g_dnsServer = nullptr;
+static uint32_t g_portalStartMs = 0;
+#define PORTAL_TIMEOUT_MS 120000  // 2 minutes timeout for portal
+
 
 // India Standard Time offset from UTC in seconds (+5:30)
 static const long IST_OFFSET_SECONDS = 5 * 3600 + 30 * 60;
@@ -546,8 +559,6 @@ struct SendJob {
 // Queue handle for pending HTTP jobs
 QueueHandle_t g_sendQueue = nullptr;
 
-static volatile bool g_portalRunning = false;
-
 // =============================
 // Forward Declarations (all functions defined later)
 // =============================
@@ -556,7 +567,6 @@ void sendTokenData(const char *id, const TokenData *token_data);
 void fetchPeer(const char* peerId, TokenData* peerData, const char* apikey, mealType meal, const char* dateStr);
 void peerFetchTask(void* pv);
 void fetchPeerDataIfNeeded();
-void checkWiFi();
 void setupSerial();
 void setupDisplay();
 void setupSensors();
@@ -581,16 +591,19 @@ inline void setSystemTimeFromRTC(const DateTime& dt);
 inline void setRTCFromSystemTime();
 inline void logCurrentISTTime();
 inline void setSystemTimeFromEpoch(time_t e);
-void wifiPortalTask(void *pv) ;
-void wifiManagerTask(void *param);
 static bool tryAcquireTimeFromNTP();
-static uint8_t batteryLevelFromVoltageHyst(float vBat, uint8_t curLevel) ;
-// NEW: Sensor sampling task forward declaration
+static uint8_t batteryLevelFromVoltageHyst(float vBat, uint8_t curLevel);
 void sensorTask(void *pv);
-void fetchPeer(const char* peerId, TokenData* peerData, const char* apikey, mealType meal, const char* dateStr);
-void peerFetchTask(void* pv);
-void fetchPeerDataIfNeeded();
-static void tryStaticNetworksNoScan(uint32_t nowMs);
+// WiFi simplified functions
+void loadCustomCredentials();
+void saveCustomCredentials(const char* ssid, const char* pass);
+void startWiFiPortal();
+void stopWiFiPortal();
+void handlePortalRoot();
+void handlePortalSave();
+void processPortal();
+bool tryConnectToNetworks();
+void wifiConnectTask(void *pv);
 
 
 void httpSenderTask(void *pvParameters) ;
@@ -725,17 +738,19 @@ delay(300);   // optional (0.5–1.0s feels good)
   g_timeValid = false;
   strcpy(g_timeErrorMsg, "");
 
-  // Start WiFiManager in background task (non-blocking)
+  // Load custom WiFi credentials from storage
+  loadCustomCredentials();
 
+  // Start WiFi connection task (non-blocking)
   xTaskCreatePinnedToCore(
-  wifiManagerTask,
-  "wifi_manager_bg",
-  8192,
-  nullptr,
-  1,
-  nullptr,
-  0
-);
+    wifiConnectTask,
+    "wifi_connect",
+    4096,
+    nullptr,
+    1,
+    nullptr,
+    0
+  );
 
   // 7. Print RTC time at boot for debugging
   DateTime rtcNowDebug = rtc.now();
@@ -827,43 +842,26 @@ if (ntpEpoch >= validThreshold) {
     Serial.println("[STORAGE] Invalid token data in prefs, reset to defaults.");
   }
 
-  // 12. WiFiManager: connect or launch captive portal if needed (now in background task)
-  // Launch WiFiManager in a non-blocking background task. Never restart or block main logic.
-// xTaskCreatePinnedToCore(
-//   wifiPortalTask,
-//   "wifi_portal_bg",
-//   8192,
-//   nullptr,
-//   1,
-//   nullptr,
-//   0
-// );
+  // 12. WiFi: connection handled by wifiConnectTask (manual portal via Key4 long-press)
 
-
-
- // 13. Wait for NTP sync and initialize meal/date state (NON-BLOCKING BOOT)
-
-
-
-  // 14. Create a queue for up to 3 send jobs (for HTTP background task)
+  // 13. Create a queue for up to 3 send jobs (for HTTP background task)
   g_sendQueue = xQueueCreate(3, sizeof(SendJob));
   if (g_sendQueue == nullptr) {
     Serial.println("ERROR: Failed to create send queue!");
   } else {
-    // Create background HTTP sender task on core 1 (typical for Arduino loop on core 1)
+    // Create background HTTP sender task on core 1
     xTaskCreatePinnedToCore(
-      httpSenderTask,      // task function
-      "httpSender",        // name
-      8192,                // stack size (bytes)
-      nullptr,             // parameter
-      1,                   // priority (low/medium)
-      nullptr,             // task handle
-      1                    // core ID (0 or 1; often 1 works fine)
+      httpSenderTask,
+      "httpSender",
+      8192,
+      nullptr,
+      1,
+      nullptr,
+      1
     );
   }
 
-  // 15. Final system ready message
-  // NEW: Start sensor task for deterministic 2ms sampling
+  // 14. Start sensor task for deterministic 2ms sampling
   xTaskCreatePinnedToCore(
     sensorTask,
     "sensorTask",
@@ -876,8 +874,7 @@ if (ntpEpoch >= validThreshold) {
 
   Serial.println("System initialized.");
 
-  analogReadResolution(12);                       // 0..4095
-  // analogSetPinAttenuation(VBAT_SENSE_PIN, ADC_6db);      // best for ~0..2.2V
+  analogReadResolution(12);
   analogSetPinAttenuation(VBAT_SENSE_PIN, ADC_11db);
 }
 
@@ -950,7 +947,7 @@ void loop() {
   now = millis();
   // Always keep trying NTP if time is not valid
   if (!g_timeValid) {
-    // wifiManagerTask is running on its own core
+    // wifiConnectTask handles reconnection in background
 
     // Try recover once per second (don’t spam)
     static uint32_t lastTry = 0;
@@ -1324,6 +1321,9 @@ void handleKeypad() {
   // Combo tracking for 2 + 3 (bundle lock/unlock)
   static bool bundleLockComboDone = false;
 
+  // Key 4 long-press tracking for WiFi portal (5 seconds)
+  static bool k4PortalTriggered = false;
+
   // --- Debounced PRESS events ---
   if (k1 && !k1Down && (nowMs - g_key1LastPressMs >= BUTTON_DEBOUNCE_MS)) {
     k1Down = true;
@@ -1344,6 +1344,17 @@ void handleKeypad() {
     k4Down = true;
     k4DownMs = nowMs;
     g_key4LastPressMs = nowMs;
+    k4PortalTriggered = false;  // Reset portal trigger on new press
+  }
+
+  // --- Key 4 long-press (5s) for WiFi portal ---
+  if (k4Down && !k1Down && !comboActive && !g_portalActive) {
+    if (!k4PortalTriggered && (nowMs - k4DownMs >= 5000)) {
+      k4PortalTriggered = true;
+      g_lastKeyPressed = "WiFi Portal";
+      Serial.println("[Keypad] Key 4 held 5s -> Starting WiFi Portal");
+      startWiFiPortal();
+    }
   }
 
   // --- Combo handling (Keys 1 + 4) ---
@@ -1441,10 +1452,12 @@ void handleKeypad() {
   if (k4Released) {
     k4Down = false;
     g_key4LastPressMs = nowMs;
-    if (!ignoreSinglesAfterCombo) {
-      g_lastKeyPressed = "Key 4 (reserved)";
-      Serial.println("Key 4 single (reserved)");
+    if (!ignoreSinglesAfterCombo && !k4PortalTriggered) {
+      // Short press - reserved for future use
+      g_lastKeyPressed = "Key 4";
+      Serial.println("Key 4 short press");
     }
+    k4PortalTriggered = false;  // Reset for next press
   }
 
   // If combo ended (both not down), clear combo-related flags
@@ -1535,6 +1548,7 @@ void drawBattery(uint8_t levelIndex) {
 // levelIndex: 0..4
 //  0 -> circle with slash (no network)
 //  1..4 -> that many bars
+// When portal is active, shows hotspot symbol (inverted solid triangle)
 void drawWifi(uint8_t levelIndex) {
   if (levelIndex > 4) levelIndex = 4;
 
@@ -1547,6 +1561,23 @@ void drawWifi(uint8_t levelIndex) {
   const uint8_t wifiH = 10;
   const uint8_t wifiX = battX - wifiW - 3;  // small gap (3 px) left of battery
   const uint8_t wifiY = 1;
+
+  // --- Hotspot/AP mode: inverted solid triangle ---
+  if (g_portalActive) {
+    uint8_t cx = wifiX + wifiW / 2;
+    uint8_t topY = wifiY + 1;
+    uint8_t bottomY = wifiY + wifiH - 2;
+    uint8_t halfWidth = 5;
+    
+    // Draw filled inverted triangle (point at bottom, flat at top)
+    // Using horizontal lines to fill
+    for (int row = 0; row <= (bottomY - topY); row++) {
+      int width = halfWidth - (row * halfWidth / (bottomY - topY));
+      if (width < 1) width = 1;
+      u8g2.drawHLine(cx - width, topY + row, width * 2 + 1);
+    }
+    return;
+  }
 
   if (levelIndex == 0) {
     // --- No network: circle with slash ---
@@ -1775,91 +1806,446 @@ inline void logCurrentISTTime() {
   Serial.println(buf);
 }
 
-void wifiManagerTask(void *param) {
-  String setupName = String(deviceId) + "_SETUP";
+// =============================
+// Simplified WiFi Functions
+// =============================
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-WiFi.mode(WIFI_STA);
-WiFi.setAutoReconnect(true);
-WiFi.setSleep(false);   // IMPORTANT: improves scan/connect stability
-
-  WiFiManager wm;
-  wm.setWiFiAutoReconnect(true);
-  wm.setConfigPortalBlocking(false);
-  wm.setConfigPortalTimeout(0);
-  wm.setConnectTimeout(15);
-  wm.setConnectRetries(3);
-  wm.setBreakAfterConfig(true);
-
-  uint32_t disconnectSince = 0;
-  uint32_t lastReconnectTry = 0;
-
-  for (;;) {
-    bool connected = (WiFi.status() == WL_CONNECTED);
-
-    if (connected) {
-      g_wifiLevelIndex = 4;
-      disconnectSince = 0;
-
-      // Close any running portal once we have WiFi
-      if (wm.getConfigPortalActive()) {
-        wm.stopConfigPortal();
-        WiFi.mode(WIFI_STA);
-        g_portalRunning = false;
-        Serial.println("[WiFi] Connected -> portal stopped, STA-only");
-      }
-
-      vTaskDelay(pdMS_TO_TICKS(250));
-      continue;
-    }
-
-    // Not connected
-    g_wifiLevelIndex = 0;
-    if (disconnectSince == 0) disconnectSince = millis();
-
-    // Always keep trying to reconnect, even while portal is active
-if (millis() - lastReconnectTry > 3000) {
-  lastReconnectTry = millis();
-  Serial.println("[WiFi] Reconnect attempt...");
-
-  // Keep portal alive if it is active
-  if (wm.getConfigPortalActive()) {
-    WiFi.mode(WIFI_AP_STA);
-  } else {
-    WiFi.mode(WIFI_STA);
-  }
-
-  // 1) Try saved credentials (WM stored)
-  WiFi.reconnect();
-
-  // 2) Also try static SSIDs periodically (NO SCAN, so WM scan stays OK)
-  if (WiFi.status() != WL_CONNECTED) {
-    tryStaticNetworksNoScan(millis());
+// Load custom credentials from Preferences
+void loadCustomCredentials() {
+  Preferences wifiPrefs;
+  wifiPrefs.begin("wificfg", true);  // read-only
+  String ssid = wifiPrefs.getString("ssid", "");
+  String pass = wifiPrefs.getString("pass", "");
+  wifiPrefs.end();
+  
+  strncpy(g_customSSID, ssid.c_str(), sizeof(g_customSSID) - 1);
+  g_customSSID[sizeof(g_customSSID) - 1] = '\0';
+  strncpy(g_customPass, pass.c_str(), sizeof(g_customPass) - 1);
+  g_customPass[sizeof(g_customPass) - 1] = '\0';
+  
+  if (g_customSSID[0]) {
+    Serial.printf("[WiFi] Loaded custom SSID: %s\n", g_customSSID);
   }
 }
 
+// Save custom credentials to Preferences
+void saveCustomCredentials(const char* ssid, const char* pass) {
+  Preferences wifiPrefs;
+  wifiPrefs.begin("wificfg", false);  // read-write
+  wifiPrefs.putString("ssid", ssid);
+  wifiPrefs.putString("pass", pass);
+  wifiPrefs.end();
+  
+  strncpy(g_customSSID, ssid, sizeof(g_customSSID) - 1);
+  g_customSSID[sizeof(g_customSSID) - 1] = '\0';
+  strncpy(g_customPass, pass, sizeof(g_customPass) - 1);
+  g_customPass[sizeof(g_customPass) - 1] = '\0';
+  
+  Serial.printf("[WiFi] Saved custom SSID: %s\n", ssid);
+}
 
-    // Start portal after some time disconnected
-    if (!wm.getConfigPortalActive() && (millis() - disconnectSince > 15000)) {
-      Serial.println("[WiFi] Disconnected -> starting portal...");
-      WiFi.mode(WIFI_AP_STA);
-      wm.startConfigPortal(setupName.c_str()); // non-blocking because blocking=false
-      g_portalRunning = true;
+// Generate dynamic HTML page for WiFi configuration portal
+String generatePortalHTML() {
+  String mac = WiFi.macAddress();
+  String chipId = String((uint32_t)(ESP.getEfuseMac() >> 32), HEX) + String((uint32_t)ESP.getEfuseMac(), HEX);
+  chipId.toUpperCase();
+  uint32_t freeHeap = ESP.getFreeHeap();
+  uint32_t flashSize = ESP.getFlashChipSize() / 1024 / 1024;
+  String currentSSID = g_customSSID[0] ? String(g_customSSID) : "(not set)";
+  
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WiFi Setup</title>
+  <style>
+    body { font-family: Arial; margin: 20px; background: #f0f0f0; }
+    .container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    h1 { color: #333; text-align: center; margin-bottom: 5px; }
+    h3 { color: #666; text-align: center; margin-top: 0; font-weight: normal; }
+    label { display: block; margin-top: 10px; color: #555; }
+    input[type=text], input[type=password] { width: 100%; padding: 12px; margin: 5px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; }
+    input[type=submit] { width: 100%; background-color: #4CAF50; color: white; padding: 14px; margin: 15px 0 8px 0; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+    input[type=submit]:hover { background-color: #45a049; }
+    .show-pass { display: flex; align-items: center; margin: 5px 0; }
+    .show-pass input { width: auto; margin-right: 8px; }
+    .show-pass label { margin: 0; color: #666; font-size: 14px; }
+    .info-box { background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; padding: 12px; margin-top: 15px; }
+    .info-box h4 { margin: 0 0 10px 0; color: #495057; font-size: 14px; border-bottom: 1px solid #dee2e6; padding-bottom: 5px; }
+    .info-row { display: flex; justify-content: space-between; margin: 5px 0; font-size: 12px; }
+    .info-label { color: #6c757d; }
+    .info-value { color: #212529; font-family: monospace; word-break: break-all; }
+    .footer { color: #999; font-size: 11px; text-align: center; margin-top: 15px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>WiFi Setup</h1>
+    <h3>)rawliteral";
+  
+  html += String(deviceId);
+  html += R"rawliteral(</h3>
+    <form action="/save" method="POST">
+      <label>WiFi Network (SSID):</label>
+      <input type="text" name="ssid" id="ssid" placeholder="Enter WiFi name" required>
+      <label>Password:</label>
+      <input type="password" name="pass" id="pass" placeholder="Enter WiFi password">
+      <div class="show-pass">
+        <input type="checkbox" id="showPass" onclick="togglePassword()">
+        <label for="showPass">Show password</label>
+      </div>
+      <input type="submit" value="Save & Connect">
+    </form>
+    
+    <div class="info-box">
+      <h4>Device Information</h4>
+      <div class="info-row">
+        <span class="info-label">Device ID:</span>
+        <span class="info-value">)rawliteral";
+  html += String(deviceId);
+  html += R"rawliteral(</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">MAC Address:</span>
+        <span class="info-value">)rawliteral";
+  html += mac;
+  html += R"rawliteral(</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Chip ID:</span>
+        <span class="info-value">)rawliteral";
+  html += chipId;
+  html += R"rawliteral(</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Flash Size:</span>
+        <span class="info-value">)rawliteral";
+  html += String(flashSize) + " MB";
+  html += R"rawliteral(</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Free Heap:</span>
+        <span class="info-value">)rawliteral";
+  html += String(freeHeap / 1024) + " KB";
+  html += R"rawliteral(</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Saved SSID:</span>
+        <span class="info-value">)rawliteral";
+  html += currentSSID;
+  html += R"rawliteral(</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">AP IP:</span>
+        <span class="info-value">192.168.4.1</span>
+      </div>
+    </div>
+    
+    <p class="footer">Hold Button 4 for 5s to reopen this portal</p>
+  </div>
+  
+  <script>
+    function togglePassword() {
+      var passField = document.getElementById('pass');
+      passField.type = passField.type === 'password' ? 'text' : 'password';
     }
+  </script>
+</body>
+</html>
+)rawliteral";
+  
+  return html;
+}
 
-    // Process portal if running; if STA gets IP during portal, close it
-    if (wm.getConfigPortalActive()) {
-      wm.process();
-      if (WiFi.status() == WL_CONNECTED) {
-        wm.stopConfigPortal();
-        WiFi.mode(WIFI_STA);
-        g_portalRunning = false;
-        Serial.println("[WiFi] Connected during portal -> portal stopped");
+static const char PORTAL_SUCCESS_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WiFi Saved</title>
+  <style>
+    body { font-family: Arial; margin: 20px; background: #f0f0f0; }
+    .container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; }
+    h1 { color: #4CAF50; }
+    p { color: #333; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>&#10004; Saved!</h1>
+    <p>WiFi credentials saved successfully.</p>
+    <p>Device will now try to connect...</p>
+    <p>Hotspot will close in a few seconds.</p>
+  </div>
+</body>
+</html>
+)rawliteral";
+
+// Handle portal root page
+void handlePortalRoot() {
+  if (g_portalServer) {
+    String html = generatePortalHTML();
+    g_portalServer->send(200, "text/html", html);
+  }
+}
+
+// Handle save credentials
+void handlePortalSave() {
+  if (!g_portalServer) return;
+  
+  String ssid = g_portalServer->arg("ssid");
+  String pass = g_portalServer->arg("pass");
+  
+  if (ssid.length() > 0) {
+    saveCustomCredentials(ssid.c_str(), pass.c_str());
+    g_portalServer->send(200, "text/html", PORTAL_SUCCESS_HTML);
+    Serial.println("[Portal] Credentials saved, will stop portal soon...");
+    
+    // Set flag to stop portal - actual stop will happen in processPortal()
+    // This avoids deleting the server while inside a handler
+    g_portalStopRequested = true;
+  } else {
+    g_portalServer->send(400, "text/plain", "SSID required");
+  }
+}
+
+// Start WiFi configuration portal (AP mode only)
+void startWiFiPortal() {
+  if (g_portalActive) {
+    Serial.println("[Portal] Already active");
+    return;
+  }
+  
+  Serial.println("[Portal] Starting WiFi configuration portal...");
+  
+  // Reset stop request flag
+  g_portalStopRequested = false;
+  
+  // Stop any existing WiFi connection
+  WiFi.disconnect(true);
+  delay(100);
+  
+  // Start AP mode only (hotspot)
+  String apName = String(deviceId) + "_SETUP";
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(apName.c_str());
+  
+  IPAddress apIP = WiFi.softAPIP();
+  Serial.printf("[Portal] AP started: %s, IP: %s\n", apName.c_str(), apIP.toString().c_str());
+  
+  // Create DNS server for captive portal
+  g_dnsServer = new DNSServer();
+  g_dnsServer->start(53, "*", apIP);
+  
+  // Create web server
+  g_portalServer = new WebServer(80);
+  g_portalServer->on("/", HTTP_GET, handlePortalRoot);
+  g_portalServer->on("/save", HTTP_POST, handlePortalSave);
+  g_portalServer->onNotFound(handlePortalRoot);  // Redirect all to root
+  g_portalServer->begin();
+  
+  g_portalActive = true;
+  g_portalStartMs = millis();
+  
+  Serial.println("[Portal] Web server started on port 80");
+}
+
+// Stop WiFi portal and try connecting to networks
+void stopWiFiPortal() {
+  if (!g_portalActive) return;
+  
+  Serial.println("[Portal] Stopping portal...");
+  
+  if (g_portalServer) {
+    g_portalServer->stop();
+    delete g_portalServer;
+    g_portalServer = nullptr;
+  }
+  
+  if (g_dnsServer) {
+    g_dnsServer->stop();
+    delete g_dnsServer;
+    g_dnsServer = nullptr;
+  }
+  
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  
+  g_portalActive = false;
+  
+  Serial.println("[Portal] Portal stopped, switching to STA mode");
+  
+  // Try to connect to available networks
+  tryConnectToNetworks();
+}
+
+// Process portal (call from main loop when portal is active)
+void processPortal() {
+  if (!g_portalActive) return;
+  
+  // Check if stop was requested (from save handler)
+  if (g_portalStopRequested) {
+    static uint32_t stopRequestedMs = 0;
+    if (stopRequestedMs == 0) {
+      stopRequestedMs = millis();  // Record when stop was requested
+    }
+    // Wait 2 seconds for the response to be sent to client before stopping
+    if (millis() - stopRequestedMs > 2000) {
+      Serial.println("[Portal] Stop requested, stopping now");
+      stopRequestedMs = 0;  // Reset for next time
+      g_portalStopRequested = false;
+      stopWiFiPortal();
+      return;
+    }
+  }
+  
+  if (g_dnsServer) g_dnsServer->processNextRequest();
+  if (g_portalServer) g_portalServer->handleClient();
+  
+  // Timeout check
+  if (millis() - g_portalStartMs > PORTAL_TIMEOUT_MS) {
+    Serial.println("[Portal] Timeout, stopping portal");
+    stopWiFiPortal();
+  }
+}
+
+// Try to connect to one of the available networks (scan and connect)
+bool tryConnectToNetworks() {
+  Serial.println("[WiFi] Scanning for networks...");
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+  
+  int n = WiFi.scanNetworks();
+  Serial.printf("[WiFi] Found %d networks\n", n);
+  
+  // Check which of our 3 SSIDs are available
+  bool foundStatic1 = false, foundStatic2 = false, foundCustom = false;
+  
+  for (int i = 0; i < n; i++) {
+    String ssid = WiFi.SSID(i);
+    if (ssid == STATIC_SSID1) foundStatic1 = true;
+    if (ssid == STATIC_SSID2) foundStatic2 = true;
+    if (g_customSSID[0] && ssid == g_customSSID) foundCustom = true;
+  }
+  
+  WiFi.scanDelete();
+  
+  // Try to connect in order: custom first (user preference), then static
+  const char* ssidToTry = nullptr;
+  const char* passToTry = nullptr;
+  
+  if (foundCustom && g_customSSID[0]) {
+    ssidToTry = g_customSSID;
+    passToTry = g_customPass;
+    Serial.printf("[WiFi] Trying custom SSID: %s\n", ssidToTry);
+  } else if (foundStatic1) {
+    ssidToTry = STATIC_SSID1;
+    passToTry = STATIC_PASS1;
+    Serial.printf("[WiFi] Trying static SSID1: %s\n", ssidToTry);
+  } else if (foundStatic2) {
+    ssidToTry = STATIC_SSID2;
+    passToTry = STATIC_PASS2;
+    Serial.printf("[WiFi] Trying static SSID2: %s\n", ssidToTry);
+  }
+  
+  if (ssidToTry) {
+    WiFi.begin(ssidToTry, passToTry);
+    
+    // Wait for connection (max 10 seconds)
+    uint32_t startMs = millis();
+    while (WiFi.status() != WL_CONNECTED && (millis() - startMs) < 10000) {
+      delay(250);
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("[WiFi] Connected to %s, IP: %s\n", ssidToTry, WiFi.localIP().toString().c_str());
+      return true;
+    } else {
+      Serial.printf("[WiFi] Failed to connect to %s\n", ssidToTry);
+    }
+  } else {
+    Serial.println("[WiFi] No known networks found");
+  }
+  
+  return false;
+}
+
+// Background WiFi connection task (simple reconnect logic)
+void wifiConnectTask(void *pv) {
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false);
+  
+  uint32_t lastConnectTry = 0;
+  uint8_t networkIndex = 0;  // 0 = custom, 1 = static1, 2 = static2
+  
+  // Initial connection attempt
+  tryConnectToNetworks();
+  
+  for (;;) {
+    // Process portal if active
+    if (g_portalActive) {
+      processPortal();
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+    
+    bool connected = (WiFi.status() == WL_CONNECTED);
+    
+    if (connected) {
+      // Update WiFi signal strength indicator
+      long rssi = WiFi.RSSI();
+      if (rssi >= -55) g_wifiLevelIndex = 4;
+      else if (rssi >= -65) g_wifiLevelIndex = 3;
+      else if (rssi >= -75) g_wifiLevelIndex = 2;
+      else if (rssi >= -85) g_wifiLevelIndex = 1;
+      else g_wifiLevelIndex = 0;
+      
+      vTaskDelay(pdMS_TO_TICKS(500));
+      continue;
+    }
+    
+    // Not connected
+    g_wifiLevelIndex = 0;
+    
+    // Try reconnecting every 10 seconds
+    if (millis() - lastConnectTry > 10000) {
+      lastConnectTry = millis();
+      
+      // Cycle through available networks
+      const char* ssid = nullptr;
+      const char* pass = nullptr;
+      
+      switch (networkIndex) {
+        case 0:
+          if (g_customSSID[0]) {
+            ssid = g_customSSID;
+            pass = g_customPass;
+          }
+          break;
+        case 1:
+          ssid = STATIC_SSID1;
+          pass = STATIC_PASS1;
+          break;
+        case 2:
+          ssid = STATIC_SSID2;
+          pass = STATIC_PASS2;
+          break;
+      }
+      
+      networkIndex = (networkIndex + 1) % 3;
+      
+      if (ssid && ssid[0]) {
+        Serial.printf("[WiFi] Trying: %s\n", ssid);
+        WiFi.disconnect();
+        WiFi.begin(ssid, pass);
       }
     }
-
-    vTaskDelay(pdMS_TO_TICKS(50));
+    
+    vTaskDelay(pdMS_TO_TICKS(250));
   }
 }
 
@@ -2106,27 +2492,4 @@ static uint8_t batteryLevelFromVoltageHyst(float vBat, uint8_t curLevel) {
       if (vBat >= (T1 + H)) return 1;
       return 0;
   }
-}
-
-
-
-// =============================
-// Static WiFi connect helper (NO SCAN -> avoids WM scan collisions)
-// =============================
-static void tryStaticNetworksNoScan(uint32_t nowMs) {
-  static uint32_t lastAttemptMs = 0;
-  static uint8_t which = 0;
-
-  // attempt every 6 seconds (not too aggressive)
-  if (nowMs - lastAttemptMs < 6000) return;
-  lastAttemptMs = nowMs;
-
-  const char* ssid = (which == 0) ? STATIC_SSID1 : STATIC_SSID2;
-  const char* pass = (which == 0) ? STATIC_PASS1 : STATIC_PASS2;
-  which = (which + 1) % 2;
-
-  if (!ssid || !ssid[0]) return;
-
-  Serial.printf("[WiFi] Trying static SSID (no-scan): %s\n", ssid);
-  WiFi.begin(ssid, pass);
 }
