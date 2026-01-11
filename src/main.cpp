@@ -604,9 +604,14 @@ void handlePortalSave();
 void processPortal();
 bool tryConnectToNetworks();
 void wifiConnectTask(void *pv);
+// Time/Meal helper functions
+void getCurrentISTTime(struct tm* t);
+mealType getMealWindowFromHour(int hour);
+void getCurrentDateStr(char* dateStr, size_t len);
+mealType getCurrentMealWindow();
 // Meal window reset logic
 void checkMealWindowReset();
-void performMealReset(const char* reason);
+void resetTokenCounter(const char* reason, bool forceUpdateNVS);
 void updateLastResetInfo(mealType meal, const char* date);
 
 
@@ -1391,34 +1396,9 @@ void handleKeypad() {
     }
     if (!comboResetDone && (nowMs - comboStartMs >= COMBO_RESET_HOLD_MS)) {
       // Manual reset - always reset counter and update storage regardless of meal window
-      g_tokenCount = 0;
-      
-      // Get current date and meal for storage
-      time_t epoch = time(nullptr) + 19800; // IST offset +5:30
-      struct tm t;
-      gmtime_r(&epoch, &t);
-      
-      char currentDate[11];
-      strftime(currentDate, sizeof(currentDate), "%Y-%m-%d", &t);
-      
-      mealType currentMealWindow = NONE;
-      if (t.tm_hour >= BFL && t.tm_hour < BFH) currentMealWindow = BREAKFAST;
-      else if (t.tm_hour >= LFL && t.tm_hour <= LFH) currentMealWindow = LUNCH;
-      else if (t.tm_hour >= DFL && t.tm_hour <= DFH) currentMealWindow = DINNER;
-      
-      // Always update reset info for manual reset (even outside meal windows)
-      updateLastResetInfo(currentMealWindow, currentDate);
-      
-      // Force immediate EEPROM update
-      token_data.token_count = 0;
-      token_data.meal = currentMealWindow;
-      strncpy(token_data.date, currentDate, sizeof(token_data.date));
-      token_data.update = true;
-      
+      resetTokenCounter("Manual Reset (Keys 1+4)", true);
       g_lastKeyPressed = "Combo 1+4 Reset";
       comboResetDone = true;
-      Serial.printf("[MANUAL_RESET] Keys 1+4 held 1s -> Counter RESET (date=%s, meal=%d)\n", 
-                    currentDate, (int)currentMealWindow);
     }
   }
 
@@ -2542,6 +2522,38 @@ static uint8_t batteryLevelFromVoltageHyst(float vBat, uint8_t curLevel) {
 }
 
 // =============================
+// Time/Meal Helper Functions
+// =============================
+
+// Get current IST time (UTC + 5:30)
+void getCurrentISTTime(struct tm* t) {
+  time_t epoch = time(nullptr) + 19800; // IST offset +5:30
+  gmtime_r(&epoch, t);
+}
+
+// Get meal window from hour
+mealType getMealWindowFromHour(int hour) {
+  if (hour >= BFL && hour < BFH) return BREAKFAST;
+  if (hour >= LFL && hour <= LFH) return LUNCH;
+  if (hour >= DFL && hour <= DFH) return DINNER;
+  return NONE;
+}
+
+// Get current date string in YYYY-MM-DD format
+void getCurrentDateStr(char* dateStr, size_t len) {
+  struct tm t;
+  getCurrentISTTime(&t);
+  strftime(dateStr, len, "%Y-%m-%d", &t);
+}
+
+// Get current meal window based on current IST time
+mealType getCurrentMealWindow() {
+  struct tm t;
+  getCurrentISTTime(&t);
+  return getMealWindowFromHour(t.tm_hour);
+}
+
+// =============================
 // Meal Window Reset Logic
 // =============================
 
@@ -2549,19 +2561,15 @@ static uint8_t batteryLevelFromVoltageHyst(float vBat, uint8_t curLevel) {
 void checkMealWindowReset() {
   if (!g_timeValid) return; // Can't check without valid time
   
-  // Get current date and time
-  time_t epoch = time(nullptr) + 19800; // IST offset +5:30
+  // Get current date and time using helper functions
   struct tm t;
-  gmtime_r(&epoch, &t);
+  getCurrentISTTime(&t);
   
   char currentDate[11];
-  strftime(currentDate, sizeof(currentDate), "%Y-%m-%d", &t);
+  getCurrentDateStr(currentDate, sizeof(currentDate));
   
   // Determine current meal window (can be NONE between meals)
-  mealType currentMealWindow = NONE;
-  if (t.tm_hour >= BFL && t.tm_hour < BFH) currentMealWindow = BREAKFAST;
-  else if (t.tm_hour >= LFL && t.tm_hour <= LFH) currentMealWindow = LUNCH;
-  else if (t.tm_hour >= DFL && t.tm_hour <= DFH) currentMealWindow = DINNER;
+  mealType currentMealWindow = getMealWindowFromHour(t.tm_hour);
   
   // Determine what the "next expected meal" should be based on current time
   mealType nextExpectedMeal = BREAKFAST; // default
@@ -2614,7 +2622,7 @@ void checkMealWindowReset() {
     }
     
     if (needReset && currentMealWindow != NONE) {
-      performMealReset("Boot in new meal window");
+      resetTokenCounter("Boot in new meal window", true);
     }
     
     lastCheckedNextMeal = nextExpectedMeal;
@@ -2639,7 +2647,7 @@ void checkMealWindowReset() {
     }
     
     if (needReset) {
-      performMealReset("Entered new meal window");
+      resetTokenCounter("Entered new meal window", true);
     }
   }
   
@@ -2648,26 +2656,20 @@ void checkMealWindowReset() {
   lastCheckedNextMeal = nextExpectedMeal;
 }
 
-// Perform meal reset: reset counter and update stored info
-void performMealReset(const char* reason) {
+// Unified token counter reset function
+// reason: log message for the reset
+// forceUpdateNVS: if true, always update NVS even outside meal windows (for manual reset)
+void resetTokenCounter(const char* reason, bool forceUpdateNVS) {
   // Reset token counter
   g_tokenCount = 0;
   
-  // Get current date and meal for storage
-  time_t epoch = time(nullptr) + 19800; // IST offset +5:30
-  struct tm t;
-  gmtime_r(&epoch, &t);
-  
+  // Get current date and meal using helpers
   char currentDate[11];
-  strftime(currentDate, sizeof(currentDate), "%Y-%m-%d", &t);
+  getCurrentDateStr(currentDate, sizeof(currentDate));
+  mealType currentMealWindow = getCurrentMealWindow();
   
-  mealType currentMealWindow = NONE;
-  if (t.tm_hour >= BFL && t.tm_hour < BFH) currentMealWindow = BREAKFAST;
-  else if (t.tm_hour >= LFL && t.tm_hour <= LFH) currentMealWindow = LUNCH;
-  else if (t.tm_hour >= DFL && t.tm_hour <= DFH) currentMealWindow = DINNER;
-  
-  // Only update reset info if we're actually in a meal window
-  if (currentMealWindow != NONE) {
+  // Update storage if in meal window OR if forced (manual reset)
+  if (currentMealWindow != NONE || forceUpdateNVS) {
     // Update last reset info in storage
     updateLastResetInfo(currentMealWindow, currentDate);
     
@@ -2677,10 +2679,10 @@ void performMealReset(const char* reason) {
     strncpy(token_data.date, currentDate, sizeof(token_data.date));
     token_data.update = true;
     
-    Serial.printf("[MEAL_RESET] %s - Counter reset to 0 (date=%s, meal=%d)\n", 
+    Serial.printf("[RESET] %s - Counter reset to 0 (date=%s, meal=%d)\n", 
                   reason, currentDate, (int)currentMealWindow);
   } else {
-    Serial.printf("[MEAL_RESET] %s - Counter reset to 0 (not in meal window)\n", reason);
+    Serial.printf("[RESET] %s - Counter reset to 0 (not in meal window, NVS not updated)\n", reason);
   }
 }
 
