@@ -604,6 +604,10 @@ void handlePortalSave();
 void processPortal();
 bool tryConnectToNetworks();
 void wifiConnectTask(void *pv);
+// Meal window reset logic
+void checkMealWindowReset();
+void performMealReset(const char* reason);
+void updateLastResetInfo(mealType meal, const char* date);
 
 
 void httpSenderTask(void *pvParameters) ;
@@ -814,7 +818,7 @@ if (ntpEpoch >= validThreshold) {
 
 
 
-  // 11. Restore persistent storage (token count, meal, date)
+  // 11. Restore persistent storage and check meal window reset
   Serial.println("[STORAGE] Restoring token data from preferences...");
   prefs.begin("tokencfg", true); // read-only
   token_data.token_count = prefs.getInt("token_count", 0);
@@ -822,13 +826,21 @@ if (ntpEpoch >= validThreshold) {
   String dateStr = prefs.getString("date", "1970-01-01");
   strncpy(token_data.date, dateStr.c_str(), sizeof(token_data.date));
   token_data.date[10] = '\0';
+  
+  // Get last reset info for meal window logic
+  String lastResetDate = prefs.getString("last_reset_date", "1970-01-01");
+  mealType lastResetMeal = (mealType)prefs.getInt("last_reset_meal", NONE);
   prefs.end();
+  
   bool valid = true;
   if (token_data.meal < NONE || token_data.meal >= MEAL_COUNT) valid = false;
   if (strlen(token_data.date) != 10) valid = false;
-  Serial.printf("[STORAGE] Restored token_data: count=%d, meal=%d, date=%s\n",
+  
+  Serial.printf("[STORAGE] Restored: count=%d, meal=%d, date=%s\n", 
                 token_data.token_count, (int)token_data.meal, token_data.date);
-                g_tokenCount= token_data.token_count;
+  Serial.printf("[STORAGE] Last reset: date=%s, meal=%d\n", 
+                lastResetDate.c_str(), (int)lastResetMeal);
+  
   if (!valid) {
     token_data.token_count = 0;
     token_data.meal = NONE;
@@ -840,6 +852,11 @@ if (ntpEpoch >= validThreshold) {
     prefs.putString("date", token_data.date);
     prefs.end();
     Serial.println("[STORAGE] Invalid token data in prefs, reset to defaults.");
+    g_tokenCount = 0;
+  } else {
+    // Store last reset info globally for later checks
+    // Note: We'll check for meal window reset after time becomes valid
+    g_tokenCount = token_data.token_count;
   }
 
   // 12. WiFi: connection handled by wifiConnectTask (manual portal via Key4 long-press)
@@ -1069,11 +1086,16 @@ if (millis() - lastBattRead > 500) {
   snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d %s", displayHour, t.tm_min, isPM ? "PM" : "AM");
   g_timeString = String(timeBuf);
 
-  // Determine meal window
-  if (hour >= BFL && hour < BFH) token_data.meal = BREAKFAST;
-  else if (hour >= LFL && hour <= LFH) token_data.meal = LUNCH;
-  else if (hour >= DFL && hour <= DFH) token_data.meal = DINNER;
-  else token_data.meal = NONE;
+  // Determine meal window and check for reset
+  mealType currentMealWindow = NONE;
+  if (hour >= BFL && hour < BFH) currentMealWindow = BREAKFAST;
+  else if (hour >= LFL && hour <= LFH) currentMealWindow = LUNCH;
+  else if (hour >= DFL && hour <= DFH) currentMealWindow = DINNER;
+  
+  // Check for meal window reset (first boot or meal transition)
+  checkMealWindowReset();
+  
+  token_data.meal = currentMealWindow;
 
   // IR sensor logic and token counting
   // readSensors(); // Moved to sensorTask for deterministic timing
@@ -1368,10 +1390,35 @@ void handleKeypad() {
       Serial.println("[Keypad] Combo 1+4 started");
     }
     if (!comboResetDone && (nowMs - comboStartMs >= COMBO_RESET_HOLD_MS)) {
+      // Manual reset - always reset counter and update storage regardless of meal window
       g_tokenCount = 0;
+      
+      // Get current date and meal for storage
+      time_t epoch = time(nullptr) + 19800; // IST offset +5:30
+      struct tm t;
+      gmtime_r(&epoch, &t);
+      
+      char currentDate[11];
+      strftime(currentDate, sizeof(currentDate), "%Y-%m-%d", &t);
+      
+      mealType currentMealWindow = NONE;
+      if (t.tm_hour >= BFL && t.tm_hour < BFH) currentMealWindow = BREAKFAST;
+      else if (t.tm_hour >= LFL && t.tm_hour <= LFH) currentMealWindow = LUNCH;
+      else if (t.tm_hour >= DFL && t.tm_hour <= DFH) currentMealWindow = DINNER;
+      
+      // Always update reset info for manual reset (even outside meal windows)
+      updateLastResetInfo(currentMealWindow, currentDate);
+      
+      // Force immediate EEPROM update
+      token_data.token_count = 0;
+      token_data.meal = currentMealWindow;
+      strncpy(token_data.date, currentDate, sizeof(token_data.date));
+      token_data.update = true;
+      
       g_lastKeyPressed = "Combo 1+4 Reset";
       comboResetDone = true;
-      Serial.println("Keys 1+4 held 1s -> Counter RESET");
+      Serial.printf("[MANUAL_RESET] Keys 1+4 held 1s -> Counter RESET (date=%s, meal=%d)\n", 
+                    currentDate, (int)currentMealWindow);
     }
   }
 
@@ -2492,4 +2539,159 @@ static uint8_t batteryLevelFromVoltageHyst(float vBat, uint8_t curLevel) {
       if (vBat >= (T1 + H)) return 1;
       return 0;
   }
+}
+
+// =============================
+// Meal Window Reset Logic
+// =============================
+
+// Check if token counter should be reset based on meal window logic
+void checkMealWindowReset() {
+  if (!g_timeValid) return; // Can't check without valid time
+  
+  // Get current date and time
+  time_t epoch = time(nullptr) + 19800; // IST offset +5:30
+  struct tm t;
+  gmtime_r(&epoch, &t);
+  
+  char currentDate[11];
+  strftime(currentDate, sizeof(currentDate), "%Y-%m-%d", &t);
+  
+  // Determine current meal window (can be NONE between meals)
+  mealType currentMealWindow = NONE;
+  if (t.tm_hour >= BFL && t.tm_hour < BFH) currentMealWindow = BREAKFAST;
+  else if (t.tm_hour >= LFL && t.tm_hour <= LFH) currentMealWindow = LUNCH;
+  else if (t.tm_hour >= DFL && t.tm_hour <= DFH) currentMealWindow = DINNER;
+  
+  // Determine what the "next expected meal" should be based on current time
+  mealType nextExpectedMeal = BREAKFAST; // default
+  if (t.tm_hour >= BFL && t.tm_hour < LFL) nextExpectedMeal = LUNCH;
+  else if (t.tm_hour >= LFL && t.tm_hour < DFL) nextExpectedMeal = DINNER;
+  else if (t.tm_hour >= DFL) nextExpectedMeal = BREAKFAST; // next day
+  // else before 6 AM = BREAKFAST (same day)
+  
+  // Tracking variables
+  static mealType lastResetMeal = NONE;
+  static char lastResetDate[11] = "1970-01-01";
+  static bool bootResetChecked = false;
+  static mealType lastCheckedNextMeal = NONE;
+  
+  // First boot check: get stored reset info and determine if reset needed
+  if (!bootResetChecked) {
+    bootResetChecked = true;
+    
+    // Get stored last reset info
+    Preferences resetPrefs;
+    resetPrefs.begin("tokencfg", true);
+    String storedResetDate = resetPrefs.getString("last_reset_date", "1970-01-01");
+    mealType storedResetMeal = (mealType)resetPrefs.getInt("last_reset_meal", NONE);
+    resetPrefs.end();
+    
+    strncpy(lastResetDate, storedResetDate.c_str(), sizeof(lastResetDate));
+    lastResetMeal = storedResetMeal;
+    
+    // Check if we need to reset
+    bool needReset = false;
+    
+    // Different date = definitely need reset
+    if (strcmp(currentDate, lastResetDate) != 0) {
+      needReset = true;
+    }
+    // Same date: check if we've moved past the last reset meal
+    else {
+      // If we're currently in a meal window that's different from last reset
+      if (currentMealWindow != NONE && currentMealWindow != lastResetMeal) {
+        needReset = true;
+      }
+      // If we're between meals, check if next expected meal is different from last reset
+      else if (currentMealWindow == NONE && nextExpectedMeal != lastResetMeal) {
+        // Only reset if we're actually entering the next meal window now
+        if (currentMealWindow != NONE) {
+          needReset = true;
+        }
+        // If between meals, wait until we enter the next meal window
+      }
+    }
+    
+    if (needReset && currentMealWindow != NONE) {
+      performMealReset("Boot in new meal window");
+    }
+    
+    lastCheckedNextMeal = nextExpectedMeal;
+    return;
+  }
+  
+  // Runtime check: detect when we enter a new meal window
+  static mealType lastCurrentMeal = NONE;
+  
+  // Check if we just entered a meal window (transition from NONE to a meal)
+  if (currentMealWindow != NONE && lastCurrentMeal == NONE) {
+    // We just entered a meal window, check if reset needed
+    bool needReset = false;
+    
+    // Different date = reset
+    if (strcmp(currentDate, lastResetDate) != 0) {
+      needReset = true;
+    }
+    // Same date but different meal from last reset
+    else if (currentMealWindow != lastResetMeal) {
+      needReset = true;
+    }
+    
+    if (needReset) {
+      performMealReset("Entered new meal window");
+    }
+  }
+  
+  // Update tracking variables
+  lastCurrentMeal = currentMealWindow;
+  lastCheckedNextMeal = nextExpectedMeal;
+}
+
+// Perform meal reset: reset counter and update stored info
+void performMealReset(const char* reason) {
+  // Reset token counter
+  g_tokenCount = 0;
+  
+  // Get current date and meal for storage
+  time_t epoch = time(nullptr) + 19800; // IST offset +5:30
+  struct tm t;
+  gmtime_r(&epoch, &t);
+  
+  char currentDate[11];
+  strftime(currentDate, sizeof(currentDate), "%Y-%m-%d", &t);
+  
+  mealType currentMealWindow = NONE;
+  if (t.tm_hour >= BFL && t.tm_hour < BFH) currentMealWindow = BREAKFAST;
+  else if (t.tm_hour >= LFL && t.tm_hour <= LFH) currentMealWindow = LUNCH;
+  else if (t.tm_hour >= DFL && t.tm_hour <= DFH) currentMealWindow = DINNER;
+  
+  // Only update reset info if we're actually in a meal window
+  if (currentMealWindow != NONE) {
+    // Update last reset info in storage
+    updateLastResetInfo(currentMealWindow, currentDate);
+    
+    // Force immediate EEPROM update
+    token_data.token_count = 0;
+    token_data.meal = currentMealWindow;
+    strncpy(token_data.date, currentDate, sizeof(token_data.date));
+    token_data.update = true;
+    
+    Serial.printf("[MEAL_RESET] %s - Counter reset to 0 (date=%s, meal=%d)\n", 
+                  reason, currentDate, (int)currentMealWindow);
+  } else {
+    Serial.printf("[MEAL_RESET] %s - Counter reset to 0 (not in meal window)\n", reason);
+  }
+}
+
+// Update last reset info in NVS storage
+void updateLastResetInfo(mealType meal, const char* date) {
+  Preferences resetPrefs;
+  resetPrefs.begin("tokencfg", false); // read-write
+  resetPrefs.putString("last_reset_date", date);
+  resetPrefs.putInt("last_reset_meal", (int)meal);
+  resetPrefs.end();
+  
+  Serial.printf("[MEAL_RESET] Updated reset tracking: date=%s, meal=%d\n", 
+                date, (int)meal);
 }
