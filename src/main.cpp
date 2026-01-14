@@ -2501,7 +2501,7 @@ void getCurrentISTTime(struct tm* t) {
 
 // Get meal window from hour
 mealType getMealWindowFromHour(int hour) {
-  if (hour >= BFL && hour < BFH) return BREAKFAST;
+  if (hour >= BFL && hour <= BFH) return BREAKFAST;
   if (hour >= LFL && hour <= LFH) return LUNCH;
   if (hour >= DFL && hour <= DFH) return DINNER;
   return NONE;
@@ -2536,7 +2536,10 @@ uint8_t getWifiLevelFromRSSI(long rssi) {
 
 // Check if token counter should be reset based on meal window logic
 void checkMealWindowReset() {
-  if (!g_timeValid) return; // Can't check without valid time
+  // Skip if time is not valid yet
+  if (!g_timeValid) {
+    return;
+  }
   
   // Get current date and time using helper functions
   struct tm t;
@@ -2548,18 +2551,11 @@ void checkMealWindowReset() {
   // Determine current meal window (can be NONE between meals)
   mealType currentMealWindow = getMealWindowFromHour(t.tm_hour);
   
-  // Determine what the "next expected meal" should be based on current time
-  mealType nextExpectedMeal = BREAKFAST; // default
-  if (t.tm_hour >= BFL && t.tm_hour < LFL) nextExpectedMeal = LUNCH;
-  else if (t.tm_hour >= LFL && t.tm_hour < DFL) nextExpectedMeal = DINNER;
-  else if (t.tm_hour >= DFL) nextExpectedMeal = BREAKFAST; // next day
-  // else before 6 AM = BREAKFAST (same day)
-  
   // Tracking variables
   static mealType lastResetMeal = NONE;
   static char lastResetDate[11] = "1970-01-01";
   static bool bootResetChecked = false;
-  static mealType lastCheckedNextMeal = NONE;
+  static mealType lastCurrentMeal = NONE;
   
   // First boot check: get stored reset info and determine if reset needed
   if (!bootResetChecked) {
@@ -2572,65 +2568,75 @@ void checkMealWindowReset() {
     mealType storedResetMeal = (mealType)resetPrefs.getInt("last_reset_meal", NONE);
     resetPrefs.end();
     
-    strncpy(lastResetDate, storedResetDate.c_str(), sizeof(lastResetDate));
+    strncpy(lastResetDate, storedResetDate.c_str(), sizeof(lastResetDate) - 1);
+    lastResetDate[sizeof(lastResetDate) - 1] = '\0';
     lastResetMeal = storedResetMeal;
     
-    // Check if we need to reset
+    Serial.printf("[MEAL_CHECK] Boot check: stored reset date=%s, meal=%d, current date=%s, meal=%d\n",
+                  lastResetDate, (int)lastResetMeal, currentDate, (int)currentMealWindow);
+    
+    // Check if we need to reset on boot
     bool needReset = false;
     
     // Different date = definitely need reset
     if (strcmp(currentDate, lastResetDate) != 0) {
       needReset = true;
+      Serial.println("[MEAL_CHECK] Different date detected, reset needed");
     }
-    // Same date: check if we've moved past the last reset meal
-    else {
-      // If we're currently in a meal window that's different from last reset
-      if (currentMealWindow != NONE && currentMealWindow != lastResetMeal) {
-        needReset = true;
-      }
-      // If we're between meals, check if next expected meal is different from last reset
-      else if (currentMealWindow == NONE && nextExpectedMeal != lastResetMeal) {
-        // Only reset if we're actually entering the next meal window now
-        if (currentMealWindow != NONE) {
-          needReset = true;
-        }
-        // If between meals, wait until we enter the next meal window
-      }
+    // Same date: check if current meal window is different from last reset meal
+    else if (currentMealWindow != NONE && currentMealWindow != lastResetMeal) {
+      needReset = true;
+      Serial.printf("[MEAL_CHECK] Same date but different meal window (%d vs %d), reset needed\n",
+                    (int)currentMealWindow, (int)lastResetMeal);
     }
     
     if (needReset && currentMealWindow != NONE) {
       resetTokenCounter("Boot in new meal window", true);
+      // Update tracking variables after reset
+      lastResetMeal = currentMealWindow;
+      strncpy(lastResetDate, currentDate, sizeof(lastResetDate) - 1);
+      lastResetDate[sizeof(lastResetDate) - 1] = '\0';
     }
     
-    lastCheckedNextMeal = nextExpectedMeal;
+    // Initialize lastCurrentMeal for runtime tracking
+    lastCurrentMeal = currentMealWindow;
     return;
   }
   
-  // Runtime check: detect when we enter a new meal window
-  static mealType lastCurrentMeal = NONE;
-  
-  // Check if we just entered a meal window (transition from NONE to a meal)
-  if (currentMealWindow != NONE && lastCurrentMeal == NONE) {
-    // We just entered a meal window, check if reset needed
-    bool needReset = false;
+  // Runtime check: detect meal window transitions (ANY meal change, not just NONE -> meal)
+  if (currentMealWindow != lastCurrentMeal) {
+    // We have a meal transition
     
-    // Different date = reset
-    if (strcmp(currentDate, lastResetDate) != 0) {
-      needReset = true;
+    if (currentMealWindow != NONE) {
+      // Entering a new meal window (from NONE or from another meal)
+      bool needReset = false;
+      
+      // Different date = reset
+      if (strcmp(currentDate, lastResetDate) != 0) {
+        needReset = true;
+        Serial.printf("[MEAL_CHECK] Runtime: Different date (%s vs %s), reset needed\n",
+                      currentDate, lastResetDate);
+      }
+      // Same date but different meal from last reset
+      else if (currentMealWindow != lastResetMeal) {
+        needReset = true;
+        Serial.printf("[MEAL_CHECK] Runtime: Different meal (%d vs %d), reset needed\n",
+                      (int)currentMealWindow, (int)lastResetMeal);
+      }
+      
+      if (needReset) {
+        resetTokenCounter("Entered new meal window", true);
+        // Update tracking variables after reset
+        lastResetMeal = currentMealWindow;
+        strncpy(lastResetDate, currentDate, sizeof(lastResetDate) - 1);
+        lastResetDate[sizeof(lastResetDate) - 1] = '\0';
+      }
     }
-    // Same date but different meal from last reset
-    else if (currentMealWindow != lastResetMeal) {
-      needReset = true;
-    }
-    
-    if (needReset) {
-      resetTokenCounter("Entered new meal window", true);
-    }
+    // else: Exiting a meal window (going to NONE) - no reset needed
   }
   
-  // Update tracking variables
+  // Update tracking variable
   lastCurrentMeal = currentMealWindow;
-  lastCheckedNextMeal = nextExpectedMeal;
 }
 
 // Unified token counter reset function
