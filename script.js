@@ -50,7 +50,7 @@ function updateBatteryDisplay(deviceId, level, timestamp) {
     const diffMinutes = diffMs / (1000 * 60);
     
     // Hide battery item (label + battery) if last update is older than 1 minute
-    if (diffMinutes > 1) {
+    if (diffMinutes > 10) {
         batteryItem.style.display = 'none';
         return;
     }
