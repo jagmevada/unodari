@@ -640,6 +640,7 @@ void sendTokenData(const char *id, const TokenData *token_data) {
 
   StaticJsonDocument<256> doc;
   doc[meal[token_data->meal]] = token_data->token_count;
+  doc["battery_status"] = g_batteryLevelIndex;  // Upload battery level (0-4)
   String payload;
   serializeJson(doc, payload);
 
