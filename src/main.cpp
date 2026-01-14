@@ -1,5 +1,4 @@
 
-
 #include <Arduino.h>
 #include <Wire.h>
 #include <U8g2lib.h>
@@ -13,7 +12,13 @@
 #include <time.h>
 #include <RTClib.h>
 
-
+// =============================
+// TEST MACROS - Comment ENABLE_RTC_TEST_MODE to disable
+// // =============================
+// #define ENABLE_RTC_TEST_MODE          // Uncomment to enable RTC/token test mode
+// #define TEST_TIME       "10:53PM"       // Format: hh:mmAM or hh:mmPM (IST)
+// #define TEST_TOKEN_COUNT 40             // Token count to set for testing
+// #define TEST_LAST_MEAL   DINNER           // Last reset meal: NONE, BREAKFAST, LUNCH, DINNER
 
 // =============================
 // RTC/NTP Drift Correction State
@@ -711,6 +716,104 @@ static void showBootMessage(const char* line1, const char* line2 = nullptr) {
   u8g2.sendBuffer();
 }
 
+#ifdef ENABLE_RTC_TEST_MODE
+// =============================
+// RTC Test Mode Setup
+// =============================
+// Parses TEST_TIME ("hh:mmAM" or "hh:mmPM"), sets RTC with today's date
+void applyRTCTestMode() {
+  Serial.println("\n========================================");
+  Serial.println("[TEST MODE] RTC Test Mode ENABLED!");
+  Serial.println("========================================");
+  
+  // Parse TEST_TIME string (format: "hh:mmAM" or "hh:mmPM")
+  const char* timeStr = TEST_TIME;
+  int hour = 0, minute = 0;
+  char ampm[3] = {0};
+  
+  // Parse: "05:59AM" -> hour=5, minute=59, ampm="AM"
+  if (strlen(timeStr) >= 7) {
+    hour = (timeStr[0] - '0') * 10 + (timeStr[1] - '0');
+    minute = (timeStr[3] - '0') * 10 + (timeStr[4] - '0');
+    ampm[0] = timeStr[5];
+    ampm[1] = timeStr[6];
+  }
+  
+  // Convert 12-hour to 24-hour format
+  if (strcmp(ampm, "AM") == 0 || strcmp(ampm, "am") == 0) {
+    if (hour == 12) hour = 0;  // 12:xxAM = 00:xx
+  } else if (strcmp(ampm, "PM") == 0 || strcmp(ampm, "pm") == 0) {
+    if (hour != 12) hour += 12;  // 1-11PM -> 13-23, 12PM stays 12
+  }
+  
+  // Get current date from RTC (keep date unchanged)
+  DateTime rtcNow = rtc.now();
+  int year = rtcNow.year();
+  int month = rtcNow.month();
+  int day = rtcNow.day();
+  
+  // Convert IST to UTC for RTC storage
+  // IST = UTC + 5:30, so UTC = IST - 5:30
+  int utcHour = hour - 5;
+  int utcMinute = minute - 30;
+  int utcDay = day;
+  int utcMonth = month;
+  int utcYear = year;
+  
+  if (utcMinute < 0) {
+    utcMinute += 60;
+    utcHour -= 1;
+  }
+  if (utcHour < 0) {
+    utcHour += 24;
+    utcDay -= 1;
+    if (utcDay < 1) {
+      utcMonth -= 1;
+      if (utcMonth < 1) {
+        utcMonth = 12;
+        utcYear -= 1;
+      }
+      // Simplified: assume 28 days for prev month (edge case)
+      utcDay = 28;
+    }
+  }
+  
+  // Set RTC to UTC time
+  DateTime newTime(utcYear, utcMonth, utcDay, utcHour, utcMinute, 0);
+  rtc.adjust(newTime);
+  
+  // Also set ESP32 system time
+  struct timeval tv;
+  tv.tv_sec = newTime.unixtime();
+  tv.tv_usec = 0;
+  settimeofday(&tv, nullptr);
+  
+  // Format current date string
+  char dateStr[11];
+  snprintf(dateStr, sizeof(dateStr), "%04d-%02d-%02d", year, month, day);
+  
+  // Set token count and last reset info in NVS
+  Preferences testPrefs;
+  testPrefs.begin("tokencfg", false);
+  testPrefs.putInt("token_count", TEST_TOKEN_COUNT);
+  testPrefs.putInt("meal", (int)TEST_LAST_MEAL);
+  testPrefs.putInt("last_reset_meal", (int)TEST_LAST_MEAL);
+  testPrefs.putString("last_reset_date", dateStr);
+  testPrefs.putString("date", dateStr);
+  testPrefs.end();
+  
+  Serial.printf("[TEST MODE] Time set to: %s (IST) = %02d:%02d (24h IST)\n", 
+                TEST_TIME, hour, minute);
+  Serial.printf("[TEST MODE] RTC UTC: %04d-%02d-%02d %02d:%02d:00\n",
+                utcYear, utcMonth, utcDay, utcHour, utcMinute);
+  Serial.printf("[TEST MODE] Token count: %d\n", TEST_TOKEN_COUNT);
+  Serial.printf("[TEST MODE] Last reset meal: %d (0=NONE,1=BF,2=LUNCH,3=DINNER)\n", 
+                (int)TEST_LAST_MEAL);
+  Serial.printf("[TEST MODE] Date: %s\n", dateStr);
+  Serial.println("========================================\n");
+}
+#endif
+
 
 
 void setup() {
@@ -743,6 +846,11 @@ delay(300);   // optional (0.5–1.0s feels good)
   // 5. Initialize RTC I2C bus and DS3231 RTC
   rtcWire.begin(RTC_SDA_PIN, RTC_SCL_PIN, 100000); // 100kHz
   rtc.begin(&rtcWire);
+
+  // 5a. Apply RTC test mode if enabled (sets time and token from macros)
+  #ifdef ENABLE_RTC_TEST_MODE
+  applyRTCTestMode();
+  #endif
 
   // 6. Time source selection logic: Try NTP, else RTC, else pause system
   g_timeSource = TIME_NONE;
