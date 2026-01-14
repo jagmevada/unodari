@@ -31,6 +31,36 @@ function getCurrentMealPeriod() {
     return null;
 }
 
+// Function to update battery display
+function updateBatteryDisplay(deviceId, level, timestamp) {
+    const batteryEl = document.getElementById(`battery-${deviceId}`);
+    if (!batteryEl) return;
+    
+    const batteryItem = batteryEl.parentElement; // Get parent battery-item container
+    
+    // Check if timestamp is within 1 minute from now
+    if (!timestamp) {
+        batteryItem.style.display = 'none';
+        return;
+    }
+    
+    const lastUpdate = new Date(timestamp);
+    const now = new Date();
+    const diffMs = now - lastUpdate;
+    const diffMinutes = diffMs / (1000 * 60);
+    
+    // Hide battery item (label + battery) if last update is older than 1 minute
+    if (diffMinutes > 1) {
+        batteryItem.style.display = 'none';
+        return;
+    }
+    
+    // Show battery item and update level
+    batteryItem.style.display = 'flex';
+    const batteryLevel = Math.max(0, Math.min(4, level || 0));
+    batteryEl.setAttribute('data-level', batteryLevel);
+}
+
 // Function to highlight active meal rows
 function highlightActiveMeal() {
     const activeMeal = getCurrentMealPeriod();
@@ -80,8 +110,12 @@ async function loadData() {
             breakfast, lunch, dinner, // Auto columns
             breakfast_total, lunch_total, dinner_total, 
             breakfast_manual, lunch_manual, dinner_manual, 
+            battery_status,
             timestamp 
         } = data;
+
+        // Update battery status display (only if timestamp within 1 min)
+        updateBatteryDisplay(sensor, battery_status, timestamp);
 
         // Populate manual inputs
         const meals = [

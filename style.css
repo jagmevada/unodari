@@ -21,6 +21,83 @@ h1 {
     letter-spacing: 0.05em;
 }
 
+/* Battery Status Row */
+.battery-row {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 30px;
+    margin: 20px auto;
+    max-width: 600px;
+}
+
+.battery-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.battery-label {
+    font-size: 1.2em;
+    font-weight: bold;
+    color: #333;
+}
+
+.battery {
+    width: 50px;
+    height: 24px;
+    border: 2px solid #333;
+    border-radius: 3px;
+    position: relative;
+    background: #f0f0f0;
+}
+
+.battery::after {
+    content: '';
+    position: absolute;
+    right: -6px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 4px;
+    height: 12px;
+    background: #333;
+    border-radius: 0 2px 2px 0;
+}
+
+.battery-bars {
+    display: flex;
+    gap: 2px;
+    height: 100%;
+    padding: 3px;
+}
+
+.battery-bars .bar {
+    flex: 1;
+    background: #ddd;
+    border-radius: 1px;
+}
+
+/* Battery level colors - All green */
+.battery[data-level="4"] .bar {
+    background: #4caf50; /* 4 green bars */
+}
+
+.battery[data-level="3"] .bar:nth-child(-n+3) {
+    background: #4caf50; /* 3 green bars */
+}
+
+.battery[data-level="2"] .bar:nth-child(-n+2) {
+    background: #4caf50; /* 2 green bars */
+}
+
+.battery[data-level="1"] .bar:nth-child(1) {
+    background: #4caf50; /* 1 green bar */
+}
+
+.battery[data-level="0"] .bar {
+    background: #ddd; /* No green - empty/grey */
+}
+
 h2 {
     text-align: center;
     color: rgb(0, 0, 0);
