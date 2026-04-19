@@ -500,8 +500,23 @@ String g_timeString = "12:00 AM"; // TODO: backend should set real time here
 const char *deviceId = DEVICE_ID;
 const char *deviceId2 = PEER1_ID;
 const char *deviceId3 = PEER2_ID;
-const char *postURL = "https://akxcjabakrvfaevdfwru.supabase.co/rest/v1/unodari_token";
-const char *apikey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFreGNqYWJha3J2ZmFldmRmd3J1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDkxMjMwMjUsImV4cCI6MjA2NDY5OTAyNX0.kykki4uVVgkSVU4lH-wcuGRdyu2xJ1CQkYFhQq_u08w";
+const char *postURL = "https://ubptest.dbf.ooo/api/method/bhojanpass.utils.sensorapi.setCollectedCouponCount";
+const char *getURL  = "https://ubptest.dbf.ooo/api/method/bhojanpass.utils.sensorapi.getCollectedCouponsCount";
+const char *apikey = "";
+
+static const char* emailForDeviceId(const char* id) {
+  if (strcmp(id, "uno_1") == 0) return "dsesnor58@gmail.com";
+  if (strcmp(id, "uno_2") == 0) return "tsensor58@gmail.com";
+  if (strcmp(id, "uno_3") == 0) return "msensor58@gmail.com";
+  return "";
+}
+
+static const char* locationKeyForDeviceId(const char* id) {
+  if (strcmp(id, "uno_1") == 0) return "darshanarthi_hall";
+  if (strcmp(id, "uno_2") == 0) return "tiffin_counter";
+  if (strcmp(id, "uno_3") == 0) return "mahatma_hall";
+  return "";
+}
 
 enum mealType {
   NONE,
@@ -604,19 +619,18 @@ void sendTokenData(const char *id, const TokenData *token_data) {
   // Optional: shorter timeout so even the HTTP task doesn't block forever
   http.setTimeout(1000);  // 1s timeout instead of long default
 
-  String url = String(postURL) + "?sensor_id=eq." + id + "&date=eq." + token_data->date;
-  http.begin(url);
+  http.begin(postURL);
   http.addHeader("Content-Type", "application/json");
-  http.addHeader("apikey", apikey);
-  http.addHeader("Authorization", "Bearer " + String(apikey));
-  http.addHeader("Prefer", "return=representation");
 
   StaticJsonDocument<256> doc;
-  doc[meal[token_data->meal]] = token_data->token_count;
+  doc["user"] = emailForDeviceId(id);
+  doc["meal"] = meal[token_data->meal];
+  doc["count"] = token_data->token_count;
+  doc["meal_date"] = token_data->date;
   String payload;
   serializeJson(doc, payload);
 
-  int code = http.sendRequest("PATCH", payload);  // blocking, but only in HTTP task now
+  int code = http.POST(payload);  // blocking, but only in HTTP task now
   http.end();
 
   Serial.printf("HTTP send (%s) -> code %d\n", id, code);
@@ -2113,29 +2127,36 @@ void sensorTask(void *pv) {
 // --- fetchPeer: file-scope, blocking, HTTP+JSON only ---
 void fetchPeer(const char* peerId, TokenData* peerData, const char* apikey, mealType meal, const char* dateStr) {
   HTTPClient http;
-  String url = String(postURL) + "?sensor_id=eq." + peerId + "&date=eq." + dateStr;
-  http.begin(url);
-  http.addHeader("apikey", apikey);
+  const char* mealName = (meal == BREAKFAST) ? "breakfast" :
+                         (meal == LUNCH)     ? "lunch"     :
+                         (meal == DINNER)    ? "dinner"    : "none";
+  http.begin(getURL);
+  http.addHeader("Content-Type", "application/json");
   http.setTimeout(1500);  // 1.5 seconds
-  int code = http.GET();
-  Serial.printf("[PeerFetch] GET %s -> code %d\n", url.c_str(), code);
+
+  StaticJsonDocument<128> reqDoc;
+  reqDoc["meal"] = mealName;
+  reqDoc["meal_date"] = dateStr;
+  String reqBody;
+  serializeJson(reqDoc, reqBody);
+
+  int code = http.sendRequest("GET", reqBody);
+  Serial.printf("[PeerFetch] GET %s body=%s -> code %d\n", getURL, reqBody.c_str(), code);
   if (code == 200) {
     String payload = http.getString();
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, payload);
-    if (!err && doc.is<JsonArray>() && doc.size() > 0) {
-      JsonObject obj = doc[0];
-      int mealCount = 0;
-      if (meal == BREAKFAST) mealCount = obj["breakfast"] | 0;
-      else if (meal == LUNCH) mealCount = obj["lunch"] | 0;
-      else if (meal == DINNER) mealCount = obj["dinner"] | 0;
+    if (!err && doc["message"].is<JsonObject>()) {
+      JsonObject msg = doc["message"].as<JsonObject>();
+      const char* key = locationKeyForDeviceId(peerId);
+      int mealCount = msg[key] | 0;
       peerData->token_count = mealCount;
-      strncpy(peerData->date, obj["date"] | dateStr, sizeof(peerData->date));
+      strncpy(peerData->date, dateStr, sizeof(peerData->date));
       peerData->date[10] = '\0';
       peerData->meal = meal;
       Serial.printf("[PeerFetch] %s: meal=%d, count=%d, date=%s\n", peerId, (int)meal, mealCount, peerData->date);
     } else {
-      Serial.printf("[PeerFetch] %s: JSON parse error or empty array\n", peerId);
+      Serial.printf("[PeerFetch] %s: JSON parse error or missing message\n", peerId);
     }
   } else {
     Serial.printf("[PeerFetch] %s: HTTP GET failed\n", peerId);
