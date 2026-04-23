@@ -397,7 +397,7 @@ constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS   = 1500UL;  // per-attempt timeout w
 #define LFL 11
 #define LFH 14
 #define DFL 18
-#define DFH 21
+#define DFH 23
 #define DUMMYHREFORTESTING 0 // Set to 0 for production, >0 for testing
 
 // Time sync config
@@ -502,7 +502,16 @@ const char *deviceId2 = PEER1_ID;
 const char *deviceId3 = PEER2_ID;
 const char *postURL = "https://ubptest.dbf.ooo/api/method/bhojanpass.utils.sensorapi.setCollectedCouponCount";
 const char *getURL  = "https://ubptest.dbf.ooo/api/method/bhojanpass.utils.sensorapi.getCollectedCouponsCount";
-const char *apikey = "";
+
+// API credentials — set per-device at build time or here directly
+#ifndef DBF_API_KEY
+#define DBF_API_KEY "f16a3aacb0fc039"
+#endif
+#ifndef DBF_API_SECRET
+#define DBF_API_SECRET "8f08bdb9a594527"
+#endif
+const char *api_key    = DBF_API_KEY;
+const char *api_secret = DBF_API_SECRET;
 
 static const char* emailForDeviceId(const char* id) {
   if (strcmp(id, "uno_1") == 0) return "dsesnor58@gmail.com";
@@ -615,23 +624,18 @@ void sendTokenData(const char *id, const TokenData *token_data) {
   if (WiFi.status() != WL_CONNECTED) return;
 
   HTTPClient http;
-
-  // Optional: shorter timeout so even the HTTP task doesn't block forever
-  http.setTimeout(1000);  // 1s timeout instead of long default
+  http.setTimeout(1000);
 
   http.begin(postURL);
-  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  String auth = String("token ") + api_key + ":" + api_secret;
+  http.addHeader("Authorization", auth);
 
-  StaticJsonDocument<256> doc;
-  doc["user"] = emailForDeviceId(id);
-  doc["meal"] = meal[token_data->meal];
-  doc["coupon_count"] = token_data->token_count;
-  doc["meal_date"] = token_data->date;
-  String payload;
-  serializeJson(doc, payload);
+  String payload = "meal=" + meal[token_data->meal]
+                 + "&coupon_count=" + String(token_data->token_count);
 
   Serial.printf("[POST] %s body=%s\n", postURL, payload.c_str());
-  int code = http.POST(payload);  // blocking, but only in HTTP task now
+  int code = http.POST(payload);
   String response = http.getString();
   Serial.printf("HTTP send (%s) -> code %d, response: %s\n", emailForDeviceId(id), code, response.c_str());
   http.end();
@@ -2126,23 +2130,21 @@ void sensorTask(void *pv) {
 
 
 // --- fetchPeer: file-scope, blocking, HTTP+JSON only ---
-void fetchPeer(const char* peerId, TokenData* peerData, const char* apikey, mealType meal, const char* dateStr) {
+void fetchPeer(const char* peerId, TokenData* peerData, mealType meal, const char* dateStr) {
   HTTPClient http;
   const char* mealName = (meal == BREAKFAST) ? "breakfast" :
                          (meal == LUNCH)     ? "lunch"     :
                          (meal == DINNER)    ? "dinner"    : "none";
   http.begin(getURL);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(1500);  // 1.5 seconds
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  String auth = String("token ") + api_key + ":" + api_secret;
+  http.addHeader("Authorization", auth);
+  http.setTimeout(1500);
 
-  StaticJsonDocument<128> reqDoc;
-  reqDoc["meal"] = mealName;
-  reqDoc["meal_date"] = dateStr;
-  String reqBody;
-  serializeJson(reqDoc, reqBody);
+  String reqBody = String("meal=") + mealName;
 
-  int code = http.sendRequest("GET", reqBody);
-  // Serial.printf("[PeerFetch] GET %s body=%s -> code %d\n", getURL, reqBody.c_str(), code);
+  int code = http.POST(reqBody);
+  // Serial.printf("[PeerFetch] POST %s body=%s -> code %d\n", getURL, reqBody.c_str(), code);
   if (code == 200) {
     String payload = http.getString();
     JsonDocument doc;
@@ -2183,7 +2185,7 @@ if (now - lastPrint > 2000) {
 }
 
     if (xQueueReceive(peerFetchQueue, &req, portMAX_DELAY) == pdTRUE) {
-      fetchPeer(req.peerId, req.peerData, apikey, req.meal, req.dateStr);
+      fetchPeer(req.peerId, req.peerData, req.meal, req.dateStr);
     }
   }
 }
