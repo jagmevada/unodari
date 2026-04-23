@@ -397,7 +397,7 @@ constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS   = 1500UL;  // per-attempt timeout w
 #define LFL 11
 #define LFH 14
 #define DFL 18
-#define DFH 23
+#define DFH 21
 #define DUMMYHREFORTESTING 0 // Set to 0 for production, >0 for testing
 
 // Time sync config
@@ -536,6 +536,7 @@ enum mealType {
 };
 String meal[MEAL_COUNT] = {"none", "breakfast", "lunch", "dinner"};
 mealType currentMeal = NONE;
+int manualCount = 0;
 
 
 
@@ -1734,9 +1735,16 @@ void drawScreen() {
   char cBuf[10];
   snprintf(cBuf, sizeof(cBuf), "%s:%d", centerLabel, centerCount);
   int16_t cWidth = u8g2.getStrWidth(cBuf);
-  int16_t cX = (128 - cWidth) / 2;
+  int16_t cX = (98 - cWidth) / 2;
   u8g2.setCursor(cX, 64 - 2);
   u8g2.print(cBuf);
+    // manual peer
+  char dBuf[10];
+  snprintf(dBuf, sizeof(dBuf), "m:%d", manualCount);
+  int16_t dWidth = u8g2.getStrWidth(dBuf);
+  int16_t dX = (154 - dWidth) / 2;
+  u8g2.setCursor(dX, 64 - 2);
+  u8g2.print(dBuf);
   // Σ:sum right
   char sBuf[12];
   snprintf(sBuf, sizeof(sBuf), "\xE2\x88\x91:%d", sum); // Unicode Sigma
@@ -2156,6 +2164,7 @@ void fetchPeer(const char* peerId, TokenData* peerData, mealType meal, const cha
       Serial.printf("[PeerFetch] response: %s\n", msgStr.c_str());
       const char* key = locationKeyForDeviceId(peerId);
       int mealCount = (int)msg[key].as<float>();
+      manualCount = (int)msg["darshanarthi_hall _man"].as<float>();
       peerData->token_count = mealCount;
       strncpy(peerData->date, dateStr, sizeof(peerData->date));
       peerData->date[10] = '\0';
