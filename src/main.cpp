@@ -512,7 +512,7 @@ static const char* emailForDeviceId(const char* id) {
 }
 
 static const char* locationKeyForDeviceId(const char* id) {
-  if (strcmp(id, "uno_1") == 0) return "darshanarthi_hall";
+  if (strcmp(id, "uno_1") == 0) return "darshnarthi_hall";
   if (strcmp(id, "uno_2") == 0) return "tiffin_counter";
   if (strcmp(id, "uno_3") == 0) return "mahatma_hall";
   return "";
@@ -625,15 +625,16 @@ void sendTokenData(const char *id, const TokenData *token_data) {
   StaticJsonDocument<256> doc;
   doc["user"] = emailForDeviceId(id);
   doc["meal"] = meal[token_data->meal];
-  doc["count"] = token_data->token_count;
+  doc["coupon_count"] = token_data->token_count;
   doc["meal_date"] = token_data->date;
   String payload;
   serializeJson(doc, payload);
 
+  Serial.printf("[POST] %s body=%s\n", postURL, payload.c_str());
   int code = http.POST(payload);  // blocking, but only in HTTP task now
+  String response = http.getString();
+  Serial.printf("HTTP send (%s) -> code %d, response: %s\n", emailForDeviceId(id), code, response.c_str());
   http.end();
-
-  Serial.printf("HTTP send (%s) -> code %d\n", id, code);
 }
 
 void httpSenderTask(void *pvParameters) {
@@ -2141,15 +2142,18 @@ void fetchPeer(const char* peerId, TokenData* peerData, const char* apikey, meal
   serializeJson(reqDoc, reqBody);
 
   int code = http.sendRequest("GET", reqBody);
-  Serial.printf("[PeerFetch] GET %s body=%s -> code %d\n", getURL, reqBody.c_str(), code);
+  // Serial.printf("[PeerFetch] GET %s body=%s -> code %d\n", getURL, reqBody.c_str(), code);
   if (code == 200) {
     String payload = http.getString();
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, payload);
     if (!err && doc["message"].is<JsonObject>()) {
       JsonObject msg = doc["message"].as<JsonObject>();
+      String msgStr;
+      serializeJson(msg, msgStr);
+      Serial.printf("[PeerFetch] response: %s\n", msgStr.c_str());
       const char* key = locationKeyForDeviceId(peerId);
-      int mealCount = msg[key] | 0;
+      int mealCount = (int)msg[key].as<float>();
       peerData->token_count = mealCount;
       strncpy(peerData->date, dateStr, sizeof(peerData->date));
       peerData->date[10] = '\0';
