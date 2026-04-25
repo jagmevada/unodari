@@ -41,8 +41,8 @@ char g_timeErrorMsg[48] = "";
 
 // Supabase backend config
 // Device ID macros for build-time selection
-#define TIFFIN
-// #define MAHATMA
+// #define TIFFIN
+#define MAHATMA
 #if defined(TIFFIN)
 #define DEVICE_ID "uno_2"
 #define PEER1_ID "uno_1"
