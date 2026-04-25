@@ -295,6 +295,7 @@ enum mealType
 String meal[MEAL_COUNT] = {"none", "breakfast", "lunch", "dinner"};
 mealType currentMeal = NONE;
 int manualCount = 0;
+bool g_showTotal = true; // true = device+manual, false = device only
 
 struct TokenData
 {
@@ -600,6 +601,7 @@ void setup()
   String dateStr = prefs.getString("date", "1970-01-01");
   strncpy(token_data.date, dateStr.c_str(), sizeof(token_data.date));
   token_data.date[10] = '\0';
+  g_showTotal = prefs.getBool("show_total", true);
   prefs.end();
   bool valid = true;
   if (token_data.meal < NONE || token_data.meal >= MEAL_COUNT)
@@ -1097,6 +1099,11 @@ void handleKeypad()
   // Combo tracking for 2 + 3 (bundle lock/unlock)
   static bool bundleLockComboDone = false;
 
+  // Combo tracking for 1 + 2 (display mode toggle)
+  static bool displayModeComboActive = false;
+  static uint32_t displayModeComboStartMs = 0;
+  static bool displayModeComboDone = false;
+
   // --- Debounced PRESS events ---
   if (k1 && !k1Down && (nowMs - g_key1LastPressMs >= BUTTON_DEBOUNCE_MS))
   {
@@ -1164,6 +1171,35 @@ void handleKeypad()
     }
   }
 
+  // --- Combo handling (Keys 1 + 2) for display mode toggle ---
+  bool displayModeBothDown = k1Down && k2Down;
+  if (displayModeBothDown)
+  {
+    if (!displayModeComboActive)
+    {
+      displayModeComboActive = true;
+      displayModeComboStartMs = (k1DownMs > k2DownMs) ? k1DownMs : k2DownMs;
+      displayModeComboDone = false;
+      Serial.println("[Keypad] Combo 1+2 started");
+    }
+    if (!displayModeComboDone && (nowMs - displayModeComboStartMs >= 3000))
+    {
+      g_showTotal = !g_showTotal;
+      displayModeComboDone = true;
+      g_lastKeyPressed = g_showTotal ? "Show Total" : "Show Device";
+      prefs.begin("tokencfg", false);
+      prefs.putBool("show_total", g_showTotal);
+      prefs.end();
+      Serial.printf("Keys 1+2 held 3s -> Display: %s\n", g_showTotal ? "total" : "device only");
+    }
+  }
+  if (!k1Down && !k2Down)
+  {
+    displayModeComboActive = false;
+    displayModeComboDone = false;
+    displayModeComboStartMs = 0;
+  }
+
   // --- Debounced RELEASE events ---
   // If combo ended (both not down), clear combo-related flags for 2+3
   if (!k2Down && !k3Down)
@@ -1184,7 +1220,7 @@ void handleKeypad()
   {
     k1Down = false;
     g_key1LastPressMs = nowMs;
-    if (!ignoreSinglesAfterCombo && !g_bundleLocked)
+    if (!ignoreSinglesAfterCombo && !displayModeComboActive && !displayModeComboDone && !g_bundleLocked)
     {
       g_bundleAdd = 10; // single press Key 1 -> bundle +10
       g_bundleSetMs = nowMs;
@@ -1202,7 +1238,7 @@ void handleKeypad()
   {
     k2Down = false;
     g_key2LastPressMs = nowMs;
-    if (!g_bundleLocked)
+    if (!displayModeComboActive && !displayModeComboDone && !g_bundleLocked)
     {
       g_bundleAdd = 20; // single press Key 2 -> bundle +20
       g_bundleSetMs = nowMs;
@@ -1411,9 +1447,11 @@ void drawScreen()
   else if (currentMeal == DINNER)
     mealChar = 'D';
   u8g2.setFont(u8g2_font_7x13_tf);
-  u8g2.setCursor(0, 36); // y=10, top left, small font
+  u8g2.setCursor(0, 36);
   if (mealChar != ' ')
     u8g2.print(mealChar);
+  u8g2.setCursor(0, 48);
+  u8g2.print(g_showTotal ? "t" : "d");
   // Show bundle mode (x10/x20/x30) at left-middle if active
   if (g_bundleAdd > 0)
   {
@@ -1504,7 +1542,7 @@ void drawScreen()
 
   // Main area: big token counter 0..9999
   u8g2.setFont(u8g2_font_logisoso32_tf);
-  int displayCount = g_tokenCount + manualCount;
+  int displayCount = g_showTotal ? (g_tokenCount + manualCount) : g_tokenCount;
   if (displayCount < 0)
     displayCount = 0;
   if (displayCount > 9999)
@@ -1544,7 +1582,7 @@ void drawScreen()
     leftLabel = "D";
     centerLabel = "T";
   }
-  int sum = g_tokenCount + manualCount + leftCount + centerCount;
+  int sum = (g_showTotal ? (g_tokenCount + manualCount) : g_tokenCount) + leftCount + centerCount;
   u8g2.setFont(u8g2_font_5x8_mf);
   // Left peer
   char lBuf[10];
@@ -1560,7 +1598,7 @@ void drawScreen()
   u8g2.print(cBuf);
   // manual peer
   char dBuf[10];
-  snprintf(dBuf, sizeof(dBuf), "m:%d", manualCount);
+  snprintf(dBuf, sizeof(dBuf), "%c:%d", (char)(titleChar + 32), manualCount);
   int16_t dWidth = u8g2.getStrWidth(dBuf);
   int16_t dX = (154 - dWidth) / 2;
   u8g2.setCursor(dX, 64 - 2);
