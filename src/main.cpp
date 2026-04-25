@@ -18,6 +18,12 @@
 #ifndef STATIC_WIFI_PASS
 #define STATIC_WIFI_PASS "s1mandhar"
 #endif
+#ifndef STATIC_WIFI_SSID2
+#define STATIC_WIFI_SSID2 "Unodari.123"
+#endif
+#ifndef STATIC_WIFI_PASS2
+#define STATIC_WIFI_PASS2 "dadaniruma"
+#endif
 
 // =============================
 // RTC/NTP Drift Correction State
@@ -42,7 +48,7 @@ char g_timeErrorMsg[48] = "";
 // Supabase backend config
 // Device ID macros for build-time selection
 // #define TIFFIN
-#define MAHATMA
+// #define MAHATMA
 #if defined(TIFFIN)
 #define DEVICE_ID "uno_2"
 #define PEER1_ID "uno_1"
@@ -129,7 +135,8 @@ float readBatteryVoltage()
 constexpr uint32_t WIFI_GRACE_PERIOD_MS = 20000UL;   // wait before opening portal
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 1500UL;  // spacing between attempt cycles
 constexpr uint32_t WIFI_MODE_RECHECK_MS = 250UL;     // dwell time while connected
-constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 1500UL; // per-attempt timeout window
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 1500UL;        // per-attempt timeout for saved creds
+constexpr uint32_t STATIC_WIFI_CONNECT_TIMEOUT_MS = 10000UL; // 10s per static SSID attempt
 
 // Analog sampling and Schmitt trigger thresholds for IR
 #define IR_SAMPLE_INTERVAL_MS 1UL // sample analog inputs every 1ms
@@ -1651,6 +1658,7 @@ void wifiManagerTask(void *param)
   uint32_t disconnectSince = (state == WifiState::Connected) ? 0 : millis();
   uint32_t lastTry = 0;
   uint32_t lastStaticTry = 0;
+  uint32_t lastStaticTry2 = 0;
   uint32_t lastSavedTry = 0;
   bool preferStaticNext = true;
 
@@ -1660,27 +1668,37 @@ void wifiManagerTask(void *param)
     lastTry = (startStamp > WIFI_RETRY_INTERVAL_MS) ? (startStamp - WIFI_RETRY_INTERVAL_MS) : 0;
   }
 
-  auto attemptStatic = [&](bool portalActive) -> bool
+  auto attemptStaticCreds = [&](const char *ssid, const char *pass, bool portalActive) -> bool
   {
-    Serial.println("[WiFi] Trying static credentials");
     WiFi.mode(portalActive ? WIFI_AP_STA : WIFI_STA);
-    WiFi.begin(STATIC_WIFI_SSID, STATIC_WIFI_PASS);
+    WiFi.begin(ssid, pass);
     uint32_t start = millis();
-    while (millis() - start < WIFI_CONNECT_TIMEOUT_MS)
+    while (millis() - start < STATIC_WIFI_CONNECT_TIMEOUT_MS)
     {
       if (WiFi.status() == WL_CONNECTED)
-      {
-        Serial.println("[WiFi] Static credentials connected");
         return true;
-      }
       if (portalActive)
-      {
         wm.process();
-      }
       vTaskDelay(pdMS_TO_TICKS(100));
     }
     WiFi.disconnect(false, false);
     return false;
+  };
+
+  auto attemptStatic = [&](bool portalActive) -> bool
+  {
+    Serial.println("[WiFi] Trying primary static credentials");
+    bool ok = attemptStaticCreds(STATIC_WIFI_SSID, STATIC_WIFI_PASS, portalActive);
+    if (ok) Serial.println("[WiFi] Primary static connected");
+    return ok;
+  };
+
+  auto attemptStatic2 = [&](bool portalActive) -> bool
+  {
+    Serial.println("[WiFi] Trying secondary static credentials");
+    bool ok = attemptStaticCreds(STATIC_WIFI_SSID2, STATIC_WIFI_PASS2, portalActive);
+    if (ok) Serial.println("[WiFi] Secondary static connected");
+    return ok;
   };
 
   auto attemptSaved = [&](bool portalActive) -> bool
@@ -1714,14 +1732,23 @@ void wifiManagerTask(void *param)
     {
       uint32_t nowStamp = millis();
       if ((nowStamp - lastStaticTry) < WIFI_RETRY_INTERVAL_MS)
-      {
         return false;
-      }
       madeAttempt = true;
       lastStaticTry = nowStamp;
       bool ok = attemptStatic(portalActive);
       lastStaticTry = millis();
-      preferStaticNext = false;
+      return ok;
+    };
+
+    auto tryStatic2 = [&](void) -> bool
+    {
+      uint32_t nowStamp = millis();
+      if ((nowStamp - lastStaticTry2) < WIFI_RETRY_INTERVAL_MS)
+        return false;
+      madeAttempt = true;
+      lastStaticTry2 = nowStamp;
+      bool ok = attemptStatic2(portalActive);
+      lastStaticTry2 = millis();
       return ok;
     };
 
@@ -1729,9 +1756,7 @@ void wifiManagerTask(void *param)
     {
       uint32_t nowStamp = millis();
       if ((nowStamp - lastSavedTry) < WIFI_RETRY_INTERVAL_MS)
-      {
         return false;
-      }
       madeAttempt = true;
       lastSavedTry = nowStamp;
       bool ok = attemptSaved(portalActive);
@@ -1744,6 +1769,8 @@ void wifiManagerTask(void *param)
     {
       if (tryStatic())
         return true;
+      if (tryStatic2())
+        return true;
       if (trySaved())
         return true;
     }
@@ -1752,6 +1779,8 @@ void wifiManagerTask(void *param)
       if (trySaved())
         return true;
       if (tryStatic())
+        return true;
+      if (tryStatic2())
         return true;
     }
 
@@ -1801,6 +1830,7 @@ void wifiManagerTask(void *param)
         state = WifiState::DisconnectedGrace;
         lastTry = (nowMs > WIFI_RETRY_INTERVAL_MS) ? (nowMs - WIFI_RETRY_INTERVAL_MS) : 0;
         lastStaticTry = 0;
+        lastStaticTry2 = 0;
         lastSavedTry = 0;
         Serial.println("[WiFi] Disconnected -> grace window");
       }
@@ -1975,7 +2005,12 @@ void fetchPeer(const char *peerId, TokenData *peerData, mealType meal, const cha
       Serial.printf("[PeerFetch] response: %s\n", msgStr.c_str());
       const char *key = locationKeyForDeviceId(peerId);
       int mealCount = (int)msg[key].as<float>();
-      manualCount = (int)msg["darshanarthi_hall _man"].as<float>();
+      const char *myKey = locationKeyForDeviceId(deviceId);
+      char manKey[40];
+      snprintf(manKey, sizeof(manKey), "%s_man", myKey);
+      JsonVariant manVar = msg[manKey];
+      manualCount = manVar.isNull() ? 0 : (int)manVar.as<float>();
+      Serial.printf("[PeerFetch] manualCount key=%s val=%d\n", manKey, manualCount);
       peerData->token_count = mealCount;
       strncpy(peerData->date, dateStr, sizeof(peerData->date));
       peerData->date[10] = '\0';
