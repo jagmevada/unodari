@@ -48,7 +48,7 @@ char g_timeErrorMsg[48] = "";
 // Supabase backend config
 // Device ID macros for build-time selection
 // #define TIFFIN
-// #define MAHATMA
+#define MAHATMA
 #if defined(TIFFIN)
 #define DEVICE_ID "uno_2"
 #define PEER1_ID "uno_1"
@@ -1504,7 +1504,7 @@ void drawScreen()
 
   // Main area: big token counter 0..9999
   u8g2.setFont(u8g2_font_logisoso32_tf);
-  int displayCount = g_tokenCount;
+  int displayCount = g_tokenCount + manualCount;
   if (displayCount < 0)
     displayCount = 0;
   if (displayCount > 9999)
@@ -1544,7 +1544,7 @@ void drawScreen()
     leftLabel = "D";
     centerLabel = "T";
   }
-  int sum = g_tokenCount + leftCount + centerCount;
+  int sum = g_tokenCount + manualCount + leftCount + centerCount;
   u8g2.setFont(u8g2_font_5x8_mf);
   // Left peer
   char lBuf[10];
