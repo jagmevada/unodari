@@ -300,14 +300,15 @@ bool g_showTotal = true; // true = device+manual, false = device only
 struct TokenData
 {
   int token_count;
+  int manual_count;
   mealType meal;
   char date[11]; // "yyyy-mm-dd"
   bool update;
 };
 
-TokenData token_data = {0, NONE, "1970-01-01", false};
-TokenData token_data2 = {0, NONE, "1970-01-01", false};
-TokenData token_data3 = {0, NONE, "1970-01-01", false};
+TokenData token_data = {0, 0, NONE, "1970-01-01", false};
+TokenData token_data2 = {0, 0, NONE, "1970-01-01", false};
+TokenData token_data3 = {0, 0, NONE, "1970-01-01", false};
 Preferences prefs;
 
 // --- Peer fetch request struct and queue ---
@@ -1562,23 +1563,29 @@ void drawScreen()
   int leftCount = 0, centerCount = 0;
   const char *leftLabel = "", *centerLabel = "";
   if (strcmp(deviceId, "uno_1") == 0)
-  {                                                                                                                // Darshanarthi
-    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0;   // Tiffin
-    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0; // Mahatma
+  {
+    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0;
+    if (g_showTotal) leftCount += (token_data2.meal == currentMeal ? token_data2.manual_count : 0);
+    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0;
+    if (g_showTotal) centerCount += (token_data3.meal == currentMeal ? token_data3.manual_count : 0);
     leftLabel = "T";
     centerLabel = "M";
   }
   else if (strcmp(deviceId, "uno_2") == 0)
-  {                                                                                                                // Tiffin
-    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0;   // Darshanarthi
-    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0; // Mahatma
+  {
+    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0;
+    if (g_showTotal) leftCount += (token_data2.meal == currentMeal ? token_data2.manual_count : 0);
+    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0;
+    if (g_showTotal) centerCount += (token_data3.meal == currentMeal ? token_data3.manual_count : 0);
     leftLabel = "D";
     centerLabel = "M";
   }
   else if (strcmp(deviceId, "uno_3") == 0)
-  {                                                                                                                // Mahatma
-    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0;   // Darshanarthi
-    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0; // Tiffin
+  {
+    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0;
+    if (g_showTotal) leftCount += (token_data2.meal == currentMeal ? token_data2.manual_count : 0);
+    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0;
+    if (g_showTotal) centerCount += (token_data3.meal == currentMeal ? token_data3.manual_count : 0);
     leftLabel = "D";
     centerLabel = "T";
   }
@@ -2043,12 +2050,18 @@ void fetchPeer(const char *peerId, TokenData *peerData, mealType meal, const cha
       Serial.printf("[PeerFetch] response: %s\n", msgStr.c_str());
       const char *key = locationKeyForDeviceId(peerId);
       int mealCount = (int)msg[key].as<float>();
+      // peer's own manual count
+      char peerManKey[40];
+      snprintf(peerManKey, sizeof(peerManKey), "%s_man", key);
+      JsonVariant peerManVar = msg[peerManKey];
+      peerData->manual_count = peerManVar.isNull() ? 0 : (int)peerManVar.as<float>();
+      // current device's manual count
       const char *myKey = locationKeyForDeviceId(deviceId);
       char manKey[40];
       snprintf(manKey, sizeof(manKey), "%s_man", myKey);
       JsonVariant manVar = msg[manKey];
       manualCount = manVar.isNull() ? 0 : (int)manVar.as<float>();
-      Serial.printf("[PeerFetch] manualCount key=%s val=%d\n", manKey, manualCount);
+      Serial.printf("[PeerFetch] peer %s manual=%d | my manual=%d\n", peerId, peerData->manual_count, manualCount);
       peerData->token_count = mealCount;
       strncpy(peerData->date, dateStr, sizeof(peerData->date));
       peerData->date[10] = '\0';
