@@ -389,7 +389,7 @@ float readBatteryVoltage() {
 #define COMBO_RESET_HOLD_MS    1000UL
 
 // Meal window macros (IST)
-#define BFL 0
+#define BFL 6
 #define BFH 9
 #define LFL 11
 #define LFH 14
@@ -1936,7 +1936,7 @@ void drawScreen() {
     if (g_showTotal) centerCount += (token_data3.meal == currentMeal ? token_data3.manual_count : 0);
     leftLabel = "D";
     centerLabel = "T";
-
+  }
   int sum = (g_showTotal ? (g_tokenCount + manualCount) : g_tokenCount) + leftCount + centerCount;
   u8g2.setFont(u8g2_font_5x8_mf);
   // Left peer
@@ -1967,7 +1967,7 @@ void drawScreen() {
   u8g2.setCursor(sX, 64 - 2);
   u8g2.print(sBuf);
 }
-}
+
 // =============================
 // ISR Implementations
 // =============================
