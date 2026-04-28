@@ -293,16 +293,22 @@ char g_timeErrorMsg[48] = "";
 #define PEER1_ID    "uno_1"
 #define PEER2_ID    "uno_3"
 #define DEVICE_CAL  0.985
+#define DBF_API_KEY "f16a3aacb0fc039"
+#define DBF_API_SECRET "8f08bdb9a594527"
 #elif defined(MAHATMA)
 #define DEVICE_ID   "uno_3"
 #define PEER1_ID    "uno_1"
 #define PEER2_ID    "uno_2"
 #define DEVICE_CAL  0.9797
+#define DBF_API_KEY "1caad6cc4527117"    // TODO: add Mahatma key
+#define DBF_API_SECRET "c938348fca9d8e7" // TODO: add Mahatma secret
 #else // Default: DARSHANARTHI
 #define DEVICE_ID   "uno_1"
 #define PEER1_ID    "uno_2"
 #define PEER2_ID    "uno_3"
 #define DEVICE_CAL  0.985
+#define DBF_API_KEY "40035b3c4921e02"    // TODO: add Darshanarthi key
+#define DBF_API_SECRET "597ab705b10bb8d" // TODO: add Darshanarthi secret
 #endif
 
 // =============================
@@ -383,7 +389,7 @@ float readBatteryVoltage() {
 #define COMBO_RESET_HOLD_MS    1000UL
 
 // Meal window macros (IST)
-#define BFL 6
+#define BFL 0
 #define BFH 9
 #define LFL 11
 #define LFH 14
@@ -516,8 +522,37 @@ String g_timeString = "12:00 AM"; // TODO: backend should set real time here
 const char *deviceId = DEVICE_ID;
 const char *deviceId2 = PEER1_ID;
 const char *deviceId3 = PEER2_ID;
-const char *postURL = "https://akxcjabakrvfaevdfwru.supabase.co/rest/v1/unodari_token";
-const char *apikey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFreGNqYWJha3J2ZmFldmRmd3J1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDkxMjMwMjUsImV4cCI6MjA2NDY5OTAyNX0.kykki4uVVgkSVU4lH-wcuGRdyu2xJ1CQkYFhQq_u08w";
+// const char *postURL = "https://akxcjabakrvfaevdfwru.supabase.co/rest/v1/unodari_token";
+// const char *apikey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFreGNqYWJha3J2ZmFldmRmd3J1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDkxMjMwMjUsImV4cCI6MjA2NDY5OTAyNX0.kykki4uVVgkSVU4lH-wcuGRdyu2xJ1CQkYFhQq_u08w";
+
+const char *postURL = "https://ubptest.dbf.ooo/api/method/bhojanpass.utils.sensorapi.setCollectedCouponCount";
+const char *getURL = "https://ubptest.dbf.ooo/api/method/bhojanpass.utils.sensorapi.getCollectedCouponsCount";
+
+const char *api_key = DBF_API_KEY;
+const char *api_secret = DBF_API_SECRET;
+
+static const char *emailForDeviceId(const char *id)
+{
+  if (strcmp(id, "uno_1") == 0)
+    return "dsesnor58@gmail.com";
+  if (strcmp(id, "uno_2") == 0)
+    return "tsensor58@gmail.com";
+  if (strcmp(id, "uno_3") == 0)
+    return "msensor58@gmail.com";
+  return "";
+}
+
+static const char *locationKeyForDeviceId(const char *id)
+{
+  if (strcmp(id, "uno_1") == 0)
+    return "darshnarthi_hall";
+  if (strcmp(id, "uno_2") == 0)
+    return "tiffin_counter";
+  if (strcmp(id, "uno_3") == 0)
+    return "mahatma_hall";
+  return "";
+}
+
 
 enum mealType {
   NONE,
@@ -529,18 +564,21 @@ enum mealType {
 String meal[MEAL_COUNT] = {"none", "breakfast", "lunch", "dinner"};
 mealType currentMeal = NONE;
 
-
+int manualCount = 0;
+bool g_showTotal = true; // true = device+manual, false = device only
 
 struct TokenData {
   int token_count;
+    int manual_count;
   mealType meal;
   char date[11];    // "yyyy-mm-dd"
   bool update;
 };
 
-TokenData token_data = {0, NONE, "1970-01-01", false};
-TokenData token_data2 = {0, NONE, "1970-01-01", false};
-TokenData token_data3 = {0, NONE, "1970-01-01", false};
+TokenData token_data = {0, 0, NONE, "1970-01-01", false};
+TokenData token_data2 = {0, 0, NONE, "1970-01-01", false};
+TokenData token_data3 = {0, 0, NONE, "1970-01-01", false};
+
 Preferences prefs;
 
 // --- Peer fetch request struct and queue ---
@@ -623,31 +661,26 @@ void updateLastResetInfo(mealType meal, const char* date);
 
 
 void httpSenderTask(void *pvParameters) ;
-void sendTokenData(const char *id, const TokenData *token_data) {
-  if (WiFi.status() != WL_CONNECTED) return;
+void sendTokenData(const char *id, const TokenData *token_data)
+{
+  if (WiFi.status() != WL_CONNECTED)
+    return;
 
   HTTPClient http;
+  http.setTimeout(1000);
 
-  // Optional: shorter timeout so even the HTTP task doesn't block forever
-  http.setTimeout(1000);  // 1s timeout instead of long default
+  http.begin(postURL);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  String auth = String("token ") + api_key + ":" + api_secret;
+  http.addHeader("Authorization", auth);
 
-  String url = String(postURL) + "?sensor_id=eq." + id + "&date=eq." + token_data->date;
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("apikey", apikey);
-  http.addHeader("Authorization", "Bearer " + String(apikey));
-  http.addHeader("Prefer", "return=representation");
+  String payload = "meal=" + meal[token_data->meal] + "&coupon_count=" + String(token_data->token_count);
 
-  StaticJsonDocument<256> doc;
-  doc[meal[token_data->meal]] = token_data->token_count;
-  doc["battery_status"] = g_batteryLevelIndex;  // Upload battery level (0-4)
-  String payload;
-  serializeJson(doc, payload);
-
-  int code = http.sendRequest("PATCH", payload);  // blocking, but only in HTTP task now
+  Serial.printf("[POST] %s body=%s\n", postURL, payload.c_str());
+  int code = http.POST(payload);
+  String response = http.getString();
+  Serial.printf("HTTP send (%s) -> code %d, response: %s\n", emailForDeviceId(id), code, response.c_str());
   http.end();
-
-  Serial.printf("HTTP send (%s) -> code %d\n", id, code);
 }
 
 void httpSenderTask(void *pvParameters) {
@@ -942,7 +975,8 @@ if (ntpEpoch >= validThreshold) {
   String dateStr = prefs.getString("date", "1970-01-01");
   strncpy(token_data.date, dateStr.c_str(), sizeof(token_data.date));
   token_data.date[10] = '\0';
-  
+  g_showTotal = prefs.getBool("show_total", true);
+
   // Get last reset info for meal window logic
   String lastResetDate = prefs.getString("last_reset_date", "1970-01-01");
   mealType lastResetMeal = (mealType)prefs.getInt("last_reset_meal", NONE);
@@ -1440,6 +1474,11 @@ void handleKeypad() {
   // Combo tracking for 2 + 3 (bundle lock/unlock)
   static bool bundleLockComboDone = false;
 
+    // Combo tracking for 1 + 2 (display mode toggle)
+  static bool displayModeComboActive = false;
+  static uint32_t displayModeComboStartMs = 0;
+  static bool displayModeComboDone = false;
+
   // Key 4 long-press tracking for WiFi portal (5 seconds)
   static bool k4PortalTriggered = false;
 
@@ -1511,6 +1550,35 @@ void handleKeypad() {
     }
   }
 
+  // --- Combo handling (Keys 1 + 2) for display mode toggle ---
+  bool displayModeBothDown = k1Down && k2Down;
+  if (displayModeBothDown)
+  {
+    if (!displayModeComboActive)
+    {
+      displayModeComboActive = true;
+      displayModeComboStartMs = (k1DownMs > k2DownMs) ? k1DownMs : k2DownMs;
+      displayModeComboDone = false;
+      Serial.println("[Keypad] Combo 1+2 started");
+    }
+    if (!displayModeComboDone && (nowMs - displayModeComboStartMs >= 3000))
+    {
+      g_showTotal = !g_showTotal;
+      displayModeComboDone = true;
+      g_lastKeyPressed = g_showTotal ? "Show Total" : "Show Device";
+      prefs.begin("tokencfg", false);
+      prefs.putBool("show_total", g_showTotal);
+      prefs.end();
+      Serial.printf("Keys 1+2 held 3s -> Display: %s\n", g_showTotal ? "total" : "device only");
+    }
+  }
+  if (!k1Down && !k2Down)
+  {
+    displayModeComboActive = false;
+    displayModeComboDone = false;
+    displayModeComboStartMs = 0;
+  }
+
   // --- Debounced RELEASE events ---
   // If combo ended (both not down), clear combo-related flags for 2+3
   if (!k2Down && !k3Down) {
@@ -1529,7 +1597,7 @@ void handleKeypad() {
   if (k1Released) {
     k1Down = false;
     g_key1LastPressMs = nowMs;
-    if (!ignoreSinglesAfterCombo && !g_bundleLocked) {
+    if (!ignoreSinglesAfterCombo &&  !displayModeComboActive && !displayModeComboDone && !g_bundleLocked) {
       g_bundleAdd = 10; // single press Key 1 -> bundle +10
       g_bundleSetMs = nowMs;
       g_lastKeyPressed = "Key 1 Bundle +10";
@@ -1543,7 +1611,7 @@ void handleKeypad() {
   if (k2Released) {
     k2Down = false;
     g_key2LastPressMs = nowMs;
-    if (!g_bundleLocked) {
+    if (!displayModeComboActive && !displayModeComboDone && !g_bundleLocked) {
       g_bundleAdd = 20; // single press Key 2 -> bundle +20
       g_bundleSetMs = nowMs;
       g_lastKeyPressed = "Key 2 Bundle +20";
@@ -1740,12 +1808,15 @@ void drawWifi(uint8_t levelIndex) {
 void drawScreen() {
       // Show meal indicator at extreme left (small font)
       char mealChar = ' ';
-      if (currentMeal == BREAKFAST) mealChar = 'B';
-      else if (currentMeal == LUNCH) mealChar = 'L';
-      else if (currentMeal == DINNER) mealChar = 'D';
-      u8g2.setFont(u8g2_font_5x8_mf);
-      u8g2.setCursor(0, 36); // y=10, top left, small font
-      if (mealChar != ' ') u8g2.print(mealChar);
+    if (currentMeal == BREAKFAST)    mealChar = 'B';
+    else if (currentMeal == LUNCH)    mealChar = 'L';
+    else if (currentMeal == DINNER)    mealChar = 'D';
+    u8g2.setFont(u8g2_font_7x13_tf);
+    u8g2.setCursor(0, 36);
+    if (mealChar != ' ') u8g2.print(mealChar);
+    u8g2.setCursor(0, 48);
+    u8g2.print(g_showTotal ? "t" : "d");
+
     // Show bundle mode (x10/x20/x30) at left-middle if active
     if (g_bundleAdd > 0) {
       static uint32_t lastBlinkMs = 0;
@@ -1823,7 +1894,7 @@ void drawScreen() {
 
   // Main area: big token counter 0..9999
   u8g2.setFont(u8g2_font_logisoso32_tf);
-  int displayCount = g_tokenCount;
+  int displayCount = g_showTotal ? (g_tokenCount + manualCount) : g_tokenCount;
   if (displayCount < 0) displayCount = 0;
   if (displayCount > 9999) displayCount = 9999;
   char buf[6];
@@ -1839,20 +1910,34 @@ void drawScreen() {
   // Show peer counters and sum, label based on device type
   int leftCount = 0, centerCount = 0;
   const char *leftLabel = "", *centerLabel = "";
-  if (strcmp(deviceId, "uno_1") == 0) { // Darshanarthi
-    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0; // Tiffin
-    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0; // Mahatma
-    leftLabel = "T"; centerLabel = "M";
-  } else if (strcmp(deviceId, "uno_2") == 0) { // Tiffin
-    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0; // Darshanarthi
-    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0; // Mahatma
-    leftLabel = "D"; centerLabel = "M";
-  } else if (strcmp(deviceId, "uno_3") == 0) { // Mahatma
-    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0; // Darshanarthi
-    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0; // Tiffin
-    leftLabel = "D"; centerLabel = "T";
+  if (strcmp(deviceId, "uno_1") == 0)
+  {
+    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0;
+    if (g_showTotal) leftCount += (token_data2.meal == currentMeal ? token_data2.manual_count : 0);
+    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0;
+    if (g_showTotal) centerCount += (token_data3.meal == currentMeal ? token_data3.manual_count : 0);
+    leftLabel = "T";
+    centerLabel = "M";
   }
-  int sum = g_tokenCount + leftCount + centerCount;
+  else if (strcmp(deviceId, "uno_2") == 0)
+  {
+    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0;
+    if (g_showTotal) leftCount += (token_data2.meal == currentMeal ? token_data2.manual_count : 0);
+    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0;
+    if (g_showTotal) centerCount += (token_data3.meal == currentMeal ? token_data3.manual_count : 0);
+    leftLabel = "D";
+    centerLabel = "M";
+  }
+  else if (strcmp(deviceId, "uno_3") == 0)
+  {
+    leftCount = (token_data2.meal == currentMeal && token_data2.token_count >= 0) ? token_data2.token_count : 0;
+    if (g_showTotal) leftCount += (token_data2.meal == currentMeal ? token_data2.manual_count : 0);
+    centerCount = (token_data3.meal == currentMeal && token_data3.token_count >= 0) ? token_data3.token_count : 0;
+    if (g_showTotal) centerCount += (token_data3.meal == currentMeal ? token_data3.manual_count : 0);
+    leftLabel = "D";
+    centerLabel = "T";
+
+  int sum = (g_showTotal ? (g_tokenCount + manualCount) : g_tokenCount) + leftCount + centerCount;
   u8g2.setFont(u8g2_font_5x8_mf);
   // Left peer
   char lBuf[10];
@@ -1863,9 +1948,17 @@ void drawScreen() {
   char cBuf[10];
   snprintf(cBuf, sizeof(cBuf), "%s:%d", centerLabel, centerCount);
   int16_t cWidth = u8g2.getStrWidth(cBuf);
-  int16_t cX = (128 - cWidth) / 2;
+   int16_t cX = (98 - cWidth) / 2;
   u8g2.setCursor(cX, 64 - 2);
   u8g2.print(cBuf);
+    // manual peer
+  char dBuf[10];
+  snprintf(dBuf, sizeof(dBuf), "%c:%d", (char)(titleChar + 32), manualCount);
+  int16_t dWidth = u8g2.getStrWidth(dBuf);
+  int16_t dX = (154 - dWidth) / 2;
+  u8g2.setCursor(dX, 64 - 2);
+  u8g2.print(dBuf);
+
   // Σ:sum right
   char sBuf[12];
   snprintf(sBuf, sizeof(sBuf), "\xE2\x88\x91:%d", sum); // Unicode Sigma
@@ -1874,7 +1967,7 @@ void drawScreen() {
   u8g2.setCursor(sX, 64 - 2);
   u8g2.print(sBuf);
 }
-
+}
 // =============================
 // ISR Implementations
 // =============================
@@ -2483,38 +2576,64 @@ void sensorTask(void *pv) {
 
 
 // --- fetchPeer: file-scope, blocking, HTTP+JSON only ---
-void fetchPeer(const char* peerId, TokenData* peerData, const char* apikey, mealType meal, const char* dateStr) {
+void fetchPeer(const char *peerId, TokenData *peerData, mealType meal, const char *dateStr)
+{
   HTTPClient http;
-  String url = String(postURL) + "?sensor_id=eq." + peerId + "&date=eq." + dateStr;
-  http.begin(url);
-  http.addHeader("apikey", apikey);
-  http.setTimeout(1500);  // 1.5 seconds
-  int code = http.GET();
-  Serial.printf("[PeerFetch] GET %s -> code %d\n", url.c_str(), code);
-  if (code == 200) {
+  const char *mealName = (meal == BREAKFAST) ? "breakfast" : (meal == LUNCH) ? "lunch"
+                                                         : (meal == DINNER)  ? "dinner"
+                                                                             : "none";
+  http.begin(getURL);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  String auth = String("token ") + api_key + ":" + api_secret;
+  http.addHeader("Authorization", auth);
+  http.setTimeout(1500);
+
+  String reqBody = String("meal=") + mealName;
+
+  int code = http.POST(reqBody);
+  // Serial.printf("[PeerFetch] POST %s body=%s -> code %d\n", getURL, reqBody.c_str(), code);
+  if (code == 200)
+  {
     String payload = http.getString();
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, payload);
-    if (!err && doc.is<JsonArray>() && doc.size() > 0) {
-      JsonObject obj = doc[0];
-      int mealCount = 0;
-      if (meal == BREAKFAST) mealCount = obj["breakfast"] | 0;
-      else if (meal == LUNCH) mealCount = obj["lunch"] | 0;
-      else if (meal == DINNER) mealCount = obj["dinner"] | 0;
+    if (!err && doc["message"].is<JsonObject>())
+    {
+      JsonObject msg = doc["message"].as<JsonObject>();
+      String msgStr;
+      serializeJson(msg, msgStr);
+      Serial.printf("[PeerFetch] response: %s\n", msgStr.c_str());
+      const char *key = locationKeyForDeviceId(peerId);
+      int mealCount = (int)msg[key].as<float>();
+      // peer's own manual count
+      char peerManKey[40];
+      snprintf(peerManKey, sizeof(peerManKey), "%s_man", key);
+      JsonVariant peerManVar = msg[peerManKey];
+      peerData->manual_count = peerManVar.isNull() ? 0 : (int)peerManVar.as<float>();
+      // current device's manual count
+      const char *myKey = locationKeyForDeviceId(deviceId);
+      char manKey[40];
+      snprintf(manKey, sizeof(manKey), "%s_man", myKey);
+      JsonVariant manVar = msg[manKey];
+      manualCount = manVar.isNull() ? 0 : (int)manVar.as<float>();
+      Serial.printf("[PeerFetch] peer %s manual=%d | my manual=%d\n", peerId, peerData->manual_count, manualCount);
       peerData->token_count = mealCount;
-      strncpy(peerData->date, obj["date"] | dateStr, sizeof(peerData->date));
+      strncpy(peerData->date, dateStr, sizeof(peerData->date));
       peerData->date[10] = '\0';
       peerData->meal = meal;
       Serial.printf("[PeerFetch] %s: meal=%d, count=%d, date=%s\n", peerId, (int)meal, mealCount, peerData->date);
-    } else {
-      Serial.printf("[PeerFetch] %s: JSON parse error or empty array\n", peerId);
     }
-  } else {
+    else
+    {
+      Serial.printf("[PeerFetch] %s: JSON parse error or missing message\n", peerId);
+    }
+  }
+  else
+  {
     Serial.printf("[PeerFetch] %s: HTTP GET failed\n", peerId);
   }
   http.end();
 }
-
 // --- Peer fetch FreeRTOS task ---
 void peerFetchTask(void* pv) {
   PeerFetchRequest req;
@@ -2530,7 +2649,7 @@ if (now - lastPrint > 2000) {
 }
 
     if (xQueueReceive(peerFetchQueue, &req, portMAX_DELAY) == pdTRUE) {
-      fetchPeer(req.peerId, req.peerData, apikey, req.meal, req.dateStr);
+      fetchPeer(req.peerId, req.peerData, req.meal, req.dateStr);
     }
   }
 }
