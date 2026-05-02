@@ -293,22 +293,22 @@ char g_timeErrorMsg[48] = "";
 #define PEER1_ID    "uno_1"
 #define PEER2_ID    "uno_3"
 #define DEVICE_CAL  0.985
-#define DBF_API_KEY "f16a3aacb0fc039"
-#define DBF_API_SECRET "8f08bdb9a594527"
+#define DBF_API_KEY "a48bebe69939587"
+#define DBF_API_SECRET "08fb3a51abff212"
 #elif defined(MAHATMA)
 #define DEVICE_ID   "uno_3"
 #define PEER1_ID    "uno_1"
 #define PEER2_ID    "uno_2"
 #define DEVICE_CAL  0.9797
-#define DBF_API_KEY "1caad6cc4527117"    // TODO: add Mahatma key
-#define DBF_API_SECRET "c938348fca9d8e7" // TODO: add Mahatma secret
+#define DBF_API_KEY "32282d2c602a628"    // TODO: add Mahatma key
+#define DBF_API_SECRET "bc8a7ea5f03c940" // TODO: add Mahatma secret
 #else // Default: DARSHANARTHI
 #define DEVICE_ID   "uno_1"
 #define PEER1_ID    "uno_2"
 #define PEER2_ID    "uno_3"
 #define DEVICE_CAL  0.985
-#define DBF_API_KEY "40035b3c4921e02"    // TODO: add Darshanarthi key
-#define DBF_API_SECRET "597ab705b10bb8d" // TODO: add Darshanarthi secret
+#define DBF_API_KEY "8400203869cd440"    // TODO: add Darshanarthi key
+#define DBF_API_SECRET "ca5b937df2f51e6" // TODO: add Darshanarthi secret
 #endif
 
 // =============================
@@ -525,8 +525,8 @@ const char *deviceId3 = PEER2_ID;
 // const char *postURL = "https://akxcjabakrvfaevdfwru.supabase.co/rest/v1/unodari_token";
 // const char *apikey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFreGNqYWJha3J2ZmFldmRmd3J1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDkxMjMwMjUsImV4cCI6MjA2NDY5OTAyNX0.kykki4uVVgkSVU4lH-wcuGRdyu2xJ1CQkYFhQq_u08w";
 
-const char *postURL = "https://ubptest.dbf.ooo/api/method/bhojanpass.utils.sensorapi.setCollectedCouponCount";
-const char *getURL = "https://ubptest.dbf.ooo/api/method/bhojanpass.utils.sensorapi.getCollectedCouponsCount";
+const char *postURL = "https://ubp.dbf.ooo/api/method/bhojanpass.utils.sensorapi.setCollectedCouponCount";
+const char *getURL = "https://ubp.dbf.ooo/api/method/bhojanpass.utils.sensorapi.getCollectedCouponsCount";
 
 const char *api_key = DBF_API_KEY;
 const char *api_secret = DBF_API_SECRET;
